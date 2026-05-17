@@ -125,19 +125,28 @@ def create_combined_progress_success_plot(
     return fig
 
 
-def extract_frames(video_path: str, fps: float = 1.0, max_frames: int = 64) -> np.ndarray:
+def extract_frames(
+    video_path: str,
+    fps: float = 1.0,
+    max_frames: int = 64,
+    num_frames: Optional[int] = None,
+) -> np.ndarray:
     """Extract frames from video file as numpy array (T, H, W, C).
 
     Supports both local file paths and URLs (e.g., HuggingFace Hub URLs).
-    Uses the provided ``fps`` to control how densely frames are sampled from
-    the underlying video, but caps the total number of frames at ``max_frames``
-    to prevent memory issues.
+    Uses ``num_frames`` when provided to uniformly sample a fixed number of
+    frames. Otherwise, uses the provided ``fps`` to control how densely frames
+    are sampled from the underlying video, but caps the total number of frames
+    at ``max_frames`` to prevent memory issues.
 
     Args:
         video_path: Path to video file or URL
         fps: Frames per second to extract (default: 1.0)
         max_frames: Maximum number of frames to extract (default: 64). This prevents
             memory issues with long videos or high FPS settings.
+        num_frames: Optional exact number of frames to sample uniformly. If set,
+            this takes precedence over fps/max_frames and is clamped to the video
+            length.
 
     Returns:
         numpy array of shape (T, H, W, C) containing extracted frames, or None if error
@@ -161,35 +170,48 @@ def extract_frames(video_path: str, fps: float = 1.0, max_frames: int = 64) -> n
         vr = decord.VideoReader(video_path, num_threads=1)
         total_frames = len(vr)
 
-        # Determine native FPS; fall back to a reasonable default if unavailable
-        try:
-            native_fps = float(vr.get_avg_fps())
-        except Exception:
-            native_fps = 1.0
-
-        # If user-specified fps is invalid or None, default to native fps
-        if fps is None or fps <= 0:
-            fps = native_fps
-
-        # Compute how many frames we want based on desired fps
-        # num_frames ≈ total_duration * fps = total_frames * (fps / native_fps)
-        if native_fps > 0:
-            desired_frames = int(round(total_frames * (fps / native_fps)))
+        if num_frames is not None:
+            if num_frames <= 0:
+                logger.warning(f"Invalid num_frames={num_frames}; defaulting to 1 frame")
+                desired_frames = 1
+            else:
+                desired_frames = int(num_frames)
         else:
-            desired_frames = total_frames
+            # Determine native FPS; fall back to a reasonable default if unavailable
+            try:
+                native_fps = float(vr.get_avg_fps())
+            except Exception:
+                native_fps = 1.0
+
+            # If user-specified fps is invalid or None, default to native fps
+            if fps is None or fps <= 0:
+                fps = native_fps
+
+            # Compute how many frames we want based on desired fps
+            # num_frames ≈ total_duration * fps = total_frames * (fps / native_fps)
+            if native_fps > 0:
+                desired_frames = int(round(total_frames * (fps / native_fps)))
+            else:
+                desired_frames = total_frames
+
+            # IMPORTANT: Cap at max_frames to prevent memory issues
+            # This is critical when fps is high or videos are long
+            if desired_frames > max_frames:
+                logger.warning(
+                    f"Requested {desired_frames} frames but capping at {max_frames} "
+                    f"to prevent memory issues (video has {total_frames} frames at {native_fps:.2f} fps, "
+                    f"requested extraction at {fps:.2f} fps)"
+                )
+                desired_frames = max_frames
 
         # Clamp to [1, total_frames]
         desired_frames = max(1, min(desired_frames, total_frames))
 
-        # IMPORTANT: Cap at max_frames to prevent memory issues
-        # This is critical when fps is high or videos are long
-        if desired_frames > max_frames:
+        if num_frames is not None and int(num_frames) > total_frames:
             logger.warning(
-                f"Requested {desired_frames} frames but capping at {max_frames} "
-                f"to prevent memory issues (video has {total_frames} frames at {native_fps:.2f} fps, "
-                f"requested extraction at {fps:.2f} fps)"
+                f"Requested {num_frames} frames but video only has {total_frames}; "
+                f"using {desired_frames} frames"
             )
-            desired_frames = max_frames
 
         # Evenly sample indices to match the desired number of frames
         if desired_frames == total_frames:

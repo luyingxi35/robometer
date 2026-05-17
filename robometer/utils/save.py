@@ -807,6 +807,7 @@ def load_model_from_hf(
     model_path: str,
     device: torch.device,
     hub_token: str | None = None,
+    use_unsloth: bool | None = None,
 ) -> tuple[ExperimentConfig | None, Any | None, Any | None, Any | None]:
     """
     Load reward model config and model from HuggingFace or local checkpoint.
@@ -824,6 +825,9 @@ def load_model_from_hf(
                    Supports @ notation for tags: username/model@tag-name
         device: Device to load model on
         hub_token: Optional HuggingFace token for private repos
+        use_unsloth: Whether to use Unsloth for Qwen base model loading. Defaults to
+                     False for inference because checkpoints may reference standard
+                     HuggingFace base model IDs that Unsloth cannot resolve.
 
     Returns:
         Tuple of (exp_config, tokenizer, processor, reward_model)
@@ -909,6 +913,10 @@ def load_model_from_hf(
     filtered_config = {k: v for k, v in model_config_dict.items() if k in valid_keys}
 
     exp_config = ExperimentConfig(**filtered_config)
+    if use_unsloth is None:
+        use_unsloth = os.environ.get("ROBOMETER_USE_UNSLOTH", "").lower() in {"1", "true", "yes", "on"}
+    exp_config.model.use_unsloth = use_unsloth
+
     # Use resolved_path for loading the actual model
     # Import here to avoid circular dependency with setup_utils
     from robometer.utils.setup_utils import setup_model_and_processor

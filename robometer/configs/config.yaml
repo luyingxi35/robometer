@@ -19,7 +19,7 @@ trainer_cls: "rbm_heads" # "rewind_transformer"
 # =====================================================================================
 model:
   model_type: default
-  base_model_id: Qwen/Qwen3-VL-4B-Instruct
+  base_model_id: /data/yingxi/robometer/Qwen3-VL-4B-Instruct/
   torch_dtype: bfloat16
   # torch_dtype: float16
   trust_remote_code: true
