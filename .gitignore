@@ -6,3 +6,4 @@ venv_robodopamine.txt
 baseline_eval_output/*
 *.py[cod]
 robometer/Robometer-4B
+.venv
