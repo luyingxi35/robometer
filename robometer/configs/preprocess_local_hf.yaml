@@ -1,0 +1,30 @@
+# Local HF dataset preprocessing config for mani_envs-style datasets
+# Input datasets must be load_from_disk directories (e.g., .../hf_dataset)
+
+dataset_roots:
+  - "mani_envs/data_collection/progress_collection_randomized_v1/PegInsertionVertical-v1/hf_dataset"
+
+# Optional names for each dataset root. If empty, inferred from path.
+dataset_names: []
+
+max_frames_for_preprocessing: 32
+video_frame_sampling: "uniform"
+num_proc: 1
+num_threads: 8
+force_reprocess: false
+cache_dir: "/tmp/robometer_local_processed_datasets"
+
+# Required field behavior
+require_partial_success: true
+require_target_progress: true
+require_lang_vector: true
+
+# Lang vector handling when missing/None/invalid
+compute_lang_vector_if_missing: true
+sentence_model: "sentence-transformers/all-MiniLM-L12-v2"
+
+# Optional embedding preprocessing parameters (compatible with existing script behavior)
+precompute_embeddings: false
+embeddings_cache_dir: "embeddings"
+dinov2_model: "facebook/dinov2-base"
+embedding_batch_size: 64
