@@ -189,6 +189,27 @@ class DataConfig:
     # [different_task, forward_progress, reverse_progress, rewind]
     progress_strategy_ratio: List[float] = field(default_factory=lambda: [1, 1, 1, 1])
 
+    labeled_progress_data_sources: List[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Data sources that should use explicit target_progress labels, quality-ranked preference sampling, and quality-driven success labels."
+        },
+    )
+    labeled_quality_order: Dict[str, int] = field(
+        default_factory=lambda: {
+            "successful_labeled": 2,
+            "suboptimal_labeled": 1,
+            "failure_labeled": 0,
+        },
+        metadata={
+            "help": "Quality ranking used for labeled-progress datasets when constructing same-task preference pairs."
+        },
+    )
+    labeled_progress_disable_rewind: bool = field(
+        default=True,
+        metadata={"help": "If True, disable rewind-style synthetic sampling for labeled-progress datasets."},
+    )
+
     data_source_weights: Optional[Dict[str, float]] = field(
         default=None,
         metadata={

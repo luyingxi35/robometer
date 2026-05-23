@@ -34,6 +34,7 @@ from robometer.utils.timer import _timer
 from robometer.utils.video_utils import create_policy_ranking_grid
 
 logger = get_logger()
+LABELED_PROGRESS_QUALITY_LABELS = {"successful_labeled", "suboptimal_labeled", "failure_labeled"}
 
 
 def seed_worker(worker_id):
@@ -145,9 +146,23 @@ class RBMHeadsTrainer(Trainer):
                 log_level=log_level,
             )
 
-        # Use loguru logger after it's been initialized
-        loguru_logger = get_logger()
-        loguru_logger.info(f"DDP find_unused_parameters: {getattr(self.args, 'ddp_find_unused_parameters', 'N/A')}")
+    def _is_labeled_progress_source(self, data_source: Optional[str]) -> bool:
+        return data_source in set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
+
+    def _batch_has_labeled_progress_source(self, data_sources: Optional[List[str]]) -> bool:
+        if not data_sources:
+            return False
+        labeled_sources = set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
+        return any(source in labeled_sources for source in data_sources)
+
+    def _build_labeled_progress_row_mask(self, data_sources: Optional[List[str]], device: torch.device) -> Optional[torch.Tensor]:
+        if not data_sources:
+            return None
+        labeled_sources = set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
+        mask = [1.0 if source in labeled_sources else 0.0 for source in data_sources]
+        if not any(mask):
+            return None
+        return torch.tensor(mask, device=device, dtype=torch.float32).unsqueeze(-1)
 
     def create_optimizer(self):
         """
@@ -1876,6 +1891,9 @@ class RBMHeadsTrainer(Trainer):
         """
         # Get base thresholds from config
         min_success = self.config.data.min_success
+        is_labeled_progress_quality = False
+        if quality_labels:
+            is_labeled_progress_quality = any(label in LABELED_PROGRESS_QUALITY_LABELS for label in quality_labels if label is not None)
 
         # Handle Qwen/Molmo downsampling: take every 2nd frame if using Qwen/Molmo and NOT using multi_image
         # In multi_image mode, we already get one embedding per frame, so no downsampling needed
@@ -1917,8 +1935,11 @@ class RBMHeadsTrainer(Trainer):
                 target_progress, num_bins=self.config.loss.progress_discrete_bins
             )
 
-        # We predict success for frames where progress < min_success or the frame is a success
-        combined_mask = ((target_progress < min_success) | (success_labels > 0.5)).float()
+        if is_labeled_progress_quality:
+            combined_mask = torch.ones_like(success_labels, dtype=torch.float32, device=success_logits.device)
+        else:
+            # We predict success for frames where progress < min_success or the frame is a success
+            combined_mask = ((target_progress < min_success) | (success_labels > 0.5)).float()
 
         # Incorporate quality mask: always include all frames for suboptimal/failure trajectories
         if quality_mask is not None:
@@ -2484,6 +2505,23 @@ class RBMHeadsTrainer(Trainer):
             )
             final_loss += progress_loss_A
 
+            labeled_progress_b_mask = self._build_labeled_progress_row_mask(
+                inputs.get("trajectory_B_data_source"),
+                progress_pred_A.device,
+            )
+            if labeled_progress_b_mask is not None and progress_logits["B"] is not None:
+                progress_pred_B = progress_logits["B"]
+                target_progress_B = inputs["target_progress_B"]
+                target_progress_B_mask = inputs["target_progress_B_mask"].unsqueeze(-1) * labeled_progress_b_mask
+                predict_last_frame_mask_B = inputs["predict_last_frame_mask_B"]
+                progress_loss_B, _spearman_corr_B, _progress_metrics_B = self._compute_progress_loss_helper(
+                    progress_pred_B,
+                    target_progress_B,
+                    target_progress_B_mask,
+                    predict_last_frame_mask=predict_last_frame_mask_B,
+                )
+                final_loss += progress_loss_B
+
         if self.config.model.train_success_head:
             success_logits = model_outputs.success_logits
             success_logits = success_logits["A"]
@@ -2502,6 +2540,26 @@ class RBMHeadsTrainer(Trainer):
                 final_loss += success_loss
             else:
                 logger.warning(f"NaN detected in success loss")
+
+            labeled_success_b_mask = self._build_labeled_progress_row_mask(
+                inputs.get("trajectory_B_data_source"),
+                success_logits.device,
+            )
+            if labeled_success_b_mask is not None and model_outputs.success_logits["B"] is not None:
+                success_logits_B = model_outputs.success_logits["B"]
+                success_labels_B = inputs["success_labels_B"]
+                quality_labels_B = inputs.get("trajectory_B_quality_label", None)
+                target_progress_B = inputs["target_progress_B"]
+                target_progress_B_mask = inputs["target_progress_B_mask"].unsqueeze(-1) * labeled_success_b_mask
+                success_loss_B, _success_accuracy_B, _success_auprc_B, _success_metrics_B = self._compute_success_loss_helper(
+                    success_logits_B,
+                    target_progress_B,
+                    success_labels_B,
+                    progress_loss_mask=target_progress_B_mask,
+                    quality_labels=quality_labels_B,
+                )
+                if not torch.isnan(success_loss_B).any():
+                    final_loss += success_loss_B
 
         # Check for NaN in final loss
         if torch.isnan(final_loss).any():

@@ -58,6 +58,11 @@ class RBMBaseSampler:
         self.pad_frames = pad_frames
         self._cached_ids = self.dataset["id"]
         self._cached_is_robot = self.dataset["is_robot"]
+        self.labeled_progress_data_sources = set(getattr(self.config, "labeled_progress_data_sources", []) or [])
+        self.labeled_quality_order = getattr(self.config, "labeled_quality_order", {}) or {}
+        self.labeled_quality_positive_labels = {
+            quality for quality, rank in self.labeled_quality_order.items() if rank == max(self.labeled_quality_order.values(), default=2)
+        }
 
         # Build indices from combined_indices
         self._build_indices(combined_indices)
@@ -99,6 +104,12 @@ class RBMBaseSampler:
             source_to_tasks[source].add(task)
 
         self.tasks_by_data_source = {source: list(tasks) for source, tasks in source_to_tasks.items()}
+
+    def _is_labeled_progress_traj(self, traj: dict) -> bool:
+        return traj.get("data_source") in self.labeled_progress_data_sources
+
+    def _is_labeled_progress_quality(self, quality_label: Optional[str]) -> bool:
+        return quality_label in self.labeled_quality_order
 
     def _generate_sample(self, item):
         """Generate a sample from an item.
@@ -686,14 +697,24 @@ class RBMBaseSampler:
         # Get partial_success early to pass to compute_progress_from_segment
         partial_success = traj.get("partial_success")
 
-        # Compute progress
-        target_progress = compute_progress_from_segment(
-            num_frames_total=num_frames_total,
-            frame_indices=indices,
-            progress_pred_type=self.config.progress_pred_type,
-            success_cutoff=success_cutoff,
-            partial_success=partial_success,
-        )
+        if self._is_labeled_progress_traj(traj) and traj.get("target_progress") is not None:
+            raw_progress = traj.get("target_progress")
+            if not isinstance(raw_progress, (list, tuple)) or len(raw_progress) == 0:
+                logger.trace("[BASE SAMPLER] _get_traj_from_data: labeled-progress trajectory missing usable target_progress")
+                return None
+            if max(indices) >= len(raw_progress):
+                logger.trace("[BASE SAMPLER] _get_traj_from_data: target_progress shorter than sampled indices")
+                return None
+            target_progress = [float(raw_progress[idx]) for idx in indices]
+        else:
+            # Compute progress
+            target_progress = compute_progress_from_segment(
+                num_frames_total=num_frames_total,
+                frame_indices=indices,
+                progress_pred_type=self.config.progress_pred_type,
+                success_cutoff=success_cutoff,
+                partial_success=partial_success,
+            )
 
         # Subsample uniformly if needed (if we have more frames than max_frames)
         current_frame_count = len(subsampled) if hasattr(subsampled, "__len__") else subsampled.shape[0]
@@ -755,6 +776,8 @@ class RBMBaseSampler:
             dataset_success_percent=self.dataset_success_cutoff_map,
             max_success=self.config.max_success,
             quality_label=traj.get("quality_label"),
+            labeled_progress_data_sources=list(self.labeled_progress_data_sources),
+            labeled_quality_order=self.labeled_quality_order,
         )
 
         # Convert partial_success and target_progress to discrete bins if in discrete mode

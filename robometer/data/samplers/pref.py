@@ -49,6 +49,11 @@ class PrefSampler(RBMBaseSampler):
         quality_label = item["quality_label"]
         use_partial_success = item.get("partial_success") is not None
 
+        if self._is_labeled_progress_traj(item) and self._is_labeled_progress_quality(quality_label):
+            sample = self._create_labeled_progress_pref_sample(item, preferred_strategy=preferred_strategy)
+            if sample is not None:
+                return sample
+
         # Handle non-successful trajectories: use as rejected, find optimal from same task as chosen
         # skip this for trajectories with partial_success which we will handle with partial success logic
         if quality_label != "successful" and not use_partial_success:
@@ -87,6 +92,89 @@ class PrefSampler(RBMBaseSampler):
             return sample
 
         return self._create_pref_sample(item, preferred_strategy=preferred_strategy)
+
+    def _create_labeled_progress_pref_sample(
+        self, item: Dict[str, Any], preferred_strategy: Optional[DataGenStrat] = None
+    ) -> PreferenceSample | None:
+        quality_label = item.get("quality_label")
+        if quality_label not in self.labeled_quality_order:
+            return None
+
+        if preferred_strategy == DataGenStrat.REWIND and getattr(self.config, "labeled_progress_disable_rewind", True):
+            return None
+
+        if preferred_strategy is None:
+            strategy_candidates: list[tuple[DataGenStrat, float]] = []
+            same_task_weight = 0.0
+            if len(self.preference_strategy_ratio) > 1:
+                same_task_weight += self.preference_strategy_ratio[1]
+            if len(self.preference_strategy_ratio) > 3:
+                same_task_weight += self.preference_strategy_ratio[3]
+            if same_task_weight > 0:
+                strategy_candidates.append((DataGenStrat.SUBOPTIMAL, same_task_weight))
+            if len(self.preference_strategy_ratio) > 2 and self.preference_strategy_ratio[2] > 0:
+                strategy_candidates.append((DataGenStrat.DIFFERENT_TASK, self.preference_strategy_ratio[2]))
+            if strategy_candidates:
+                total = sum(weight for _, weight in strategy_candidates)
+                draw = random.random() * total
+                cumulative = 0.0
+                for strategy, weight in strategy_candidates:
+                    cumulative += weight
+                    if draw <= cumulative:
+                        preferred_strategy = strategy
+                        break
+            if preferred_strategy is None:
+                preferred_strategy = DataGenStrat.SUBOPTIMAL
+
+        if preferred_strategy == DataGenStrat.DIFFERENT_TASK:
+            sample = self._create_pref_sample(item, preferred_strategy=preferred_strategy)
+            if sample is not None:
+                return sample
+
+        task_name = item["task"]
+        same_task_indices = self.task_indices.get(task_name, [])
+        if not same_task_indices:
+            return None
+
+        ref_rank = self.labeled_quality_order[quality_label]
+        higher_indices = []
+        lower_indices = []
+        for idx in same_task_indices:
+            candidate = self.dataset[idx]
+            candidate_quality = candidate.get("quality_label")
+            if candidate_quality not in self.labeled_quality_order:
+                continue
+            if candidate.get("id") == item.get("id"):
+                continue
+            candidate_rank = self.labeled_quality_order[candidate_quality]
+            if candidate_rank > ref_rank:
+                higher_indices.append(idx)
+            elif candidate_rank < ref_rank:
+                lower_indices.append(idx)
+
+        chosen_traj_dict = None
+        rejected_traj_dict = None
+        if higher_indices:
+            chosen_traj_dict = self.dataset[random.choice(higher_indices)]
+            rejected_traj_dict = item
+        elif lower_indices:
+            chosen_traj_dict = item
+            rejected_traj_dict = self.dataset[random.choice(lower_indices)]
+        elif preferred_strategy == DataGenStrat.DIFFERENT_TASK:
+            return self._create_pref_sample(item, preferred_strategy=preferred_strategy)
+        else:
+            return None
+
+        chosen_trajectory = self._get_traj_from_data(chosen_traj_dict, subsample_strategy="subsample_forward")
+        rejected_trajectory = self._get_traj_from_data(rejected_traj_dict, subsample_strategy="subsample_forward")
+        if chosen_trajectory is None or rejected_trajectory is None:
+            return None
+
+        return PreferenceSample(
+            chosen_trajectory=chosen_trajectory,
+            rejected_trajectory=rejected_trajectory,
+            data_gen_strategy=DataGenStrat.SUBOPTIMAL.value,
+        )
 
     def _execute_strategy(
         self, strategy: DataGenStrat, chosen_traj: Dict[str, Any], use_partial_success: bool
@@ -262,7 +350,10 @@ class PrefSampler(RBMBaseSampler):
             # Strategy selection with rebalancing on failure
             strategies = []
             if self.preference_strategy_ratio[0] > 0:
-                strategies.append((DataGenStrat.REWIND, self.preference_strategy_ratio[0]))
+                if not (
+                    getattr(self.config, "labeled_progress_disable_rewind", True) and self._is_labeled_progress_traj(chosen_traj)
+                ):
+                    strategies.append((DataGenStrat.REWIND, self.preference_strategy_ratio[0]))
             if self._has_suboptimal and self.preference_strategy_ratio[1] > 0:
                 strategies.append((DataGenStrat.SUBOPTIMAL, self.preference_strategy_ratio[1]))
             if self.preference_strategy_ratio[2] > 0:

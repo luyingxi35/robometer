@@ -96,6 +96,8 @@ def compute_success_labels(
     dataset_success_percent: Optional[Dict[str, float]] = None,
     max_success: float = 1.0,
     quality_label: Optional[str] = None,
+    labeled_progress_data_sources: Optional[List[str]] = None,
+    labeled_quality_order: Optional[Dict[str, int]] = None,
 ) -> List[float]:
     """
     Compute success labels from target_progress.
@@ -112,6 +114,13 @@ def compute_success_labels(
     """
     if target_progress is None or len(target_progress) == 0:
         return []
+
+    labeled_progress_data_sources = labeled_progress_data_sources or []
+    labeled_quality_order = labeled_quality_order or {}
+    if data_source in labeled_progress_data_sources:
+        quality_key = str(quality_label) if quality_label is not None else ""
+        success_value = 1.0 if labeled_quality_order.get(quality_key) == max(labeled_quality_order.values(), default=2) else 0.0
+        return [success_value] * len(target_progress)
 
     # If trajectory is failure or suboptimal, return all 0s
     if quality_label is not None and quality_label.lower() in ("failure", "suboptimal", "failed"):

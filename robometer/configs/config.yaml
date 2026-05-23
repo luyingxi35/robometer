@@ -92,6 +92,12 @@ data:
   preference_strategy_ratio: [1, 1, 1, 1]
   # Tunable strategy ratios for progress generation: [different_task, forward_progress, reverse_progress, rewind]
   progress_strategy_ratio: [1, 1, 1, 1]  # [different_task, forward_progress, reverse_progress, rewind]
+  labeled_progress_data_sources: []
+  labeled_quality_order:
+    successful_labeled: 2
+    suboptimal_labeled: 1
+    failure_labeled: 0
+  labeled_progress_disable_rewind: true
   shuffle: true
   seed: 42
 
@@ -150,7 +156,7 @@ custom_eval:
 training:  
   # Output and logging
   output_dir: "./logs"
-  overwrite_output_dir: false  # If true, overwrite output directory if it exists (works with accelerate/distributed training)
+  overwrite_output_dir: true  # If true, overwrite output directory if it exists (works with accelerate/distributed training)
   
   # Training parameters
   per_device_train_batch_size: 16
@@ -227,7 +233,7 @@ logging:
   save_processor: true
   log_to: [wandb]
   wandb_project: "robometer"
-  wandb_entity: jesbu1
+  wandb_entity: yingxilu512-tsinghua-university
   wandb_notes: "training Robometer"
   
   # SaveBestCallback configuration

@@ -7,3 +7,5 @@ baseline_eval_output/*
 *.py[cod]
 robometer/Robometer-4B
 .venv
+logs/
+wandb/

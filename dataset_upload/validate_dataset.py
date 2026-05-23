@@ -11,6 +11,15 @@ import numpy as np
 
 from datasets import Dataset, load_from_disk
 
+VALID_QUALITY_LABELS = {
+    "successful",
+    "failure",
+    "suboptimal",
+    "successful_labeled",
+    "suboptimal_labeled",
+    "failure_labeled",
+}
+
 
 def validate_dataset_fields_and_types(dataset: Dataset, sample_size: int = 10) -> dict[str, Any]:
     """Validate dataset fields and data types."""
@@ -102,7 +111,7 @@ def validate_dataset_fields_and_types(dataset: Dataset, sample_size: int = 10) -
             if not isinstance(trajectory["quality_label"], str):
                 validation_results["errors"].append(f"Trajectory {idx}: 'quality_label' is not a string")
             else:
-                if trajectory["quality_label"] not in {"successful", "failure", "suboptimal"}:
+                if trajectory["quality_label"] not in VALID_QUALITY_LABELS:
                     validation_results["warnings"].append(
                         f"Trajectory {idx}: 'quality_label' has unexpected value '{trajectory['quality_label']}'"
                     )
