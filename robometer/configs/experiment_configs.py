@@ -510,6 +510,10 @@ class LoggingConfig:
 
     save_model: bool = field(default=True)
     save_processor: bool = field(default=True)
+    log_train_memory: bool = field(
+        default=False,
+        metadata={"help": "Whether to print per-step training memory diagnostics to the console."},
+    )
     # Logging backends
     log_to: List[str] = field(
         default_factory=list,

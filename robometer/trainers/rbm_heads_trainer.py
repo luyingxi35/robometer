@@ -146,24 +146,6 @@ class RBMHeadsTrainer(Trainer):
                 log_level=log_level,
             )
 
-    def _is_labeled_progress_source(self, data_source: Optional[str]) -> bool:
-        return data_source in set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
-
-    def _batch_has_labeled_progress_source(self, data_sources: Optional[List[str]]) -> bool:
-        if not data_sources:
-            return False
-        labeled_sources = set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
-        return any(source in labeled_sources for source in data_sources)
-
-    def _build_labeled_progress_row_mask(self, data_sources: Optional[List[str]], device: torch.device) -> Optional[torch.Tensor]:
-        if not data_sources:
-            return None
-        labeled_sources = set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
-        mask = [1.0 if source in labeled_sources else 0.0 for source in data_sources]
-        if not any(mask):
-            return None
-        return torch.tensor(mask, device=device, dtype=torch.float32).unsqueeze(-1)
-
     def create_optimizer(self):
         """
         Override to create optimizer with separate parameter groups for vision encoder layers.
@@ -467,8 +449,9 @@ class RBMHeadsTrainer(Trainer):
             except Exception as e:
                 logger.warning(f"Error logging metadata: {e}")
 
-        # Log GPU memory usage at every training step for diagnostics
-        log_memory_usage(f"Step {self.state.global_step}")
+        # Keep per-step memory diagnostics opt-in so normal training stays readable.
+        if self.config.logging.log_train_memory:
+            log_memory_usage(f"Step {self.state.global_step}")
 
         return loss
 
@@ -690,6 +673,7 @@ class RBMHeadsTrainer(Trainer):
         # make sure values are floats so they are loggable into wandb reports
         log_data = {k: float(v) for k, v in log_data.items()}
 
+        # Training scalars go to wandb/tensorboard at training.logging_steps cadence.
         self.logger.log_scalars(log_data, step=self.state.global_step + 1)
 
         if is_rank_0():
@@ -1644,6 +1628,7 @@ class RBMHeadsTrainer(Trainer):
             for timing_key, timing_value in eval_dataset_timings.items():
                 to_log[timing_key] = float(timing_value)
 
+            # Eval/custom-eval scalars use eval_steps/custom_eval_steps rather than training.logging_steps.
             self.logger.log_scalars(to_log, step=eval_step)
 
             # Log timing summary to console
@@ -2505,23 +2490,6 @@ class RBMHeadsTrainer(Trainer):
             )
             final_loss += progress_loss_A
 
-            labeled_progress_b_mask = self._build_labeled_progress_row_mask(
-                inputs.get("trajectory_B_data_source"),
-                progress_pred_A.device,
-            )
-            if labeled_progress_b_mask is not None and progress_logits["B"] is not None:
-                progress_pred_B = progress_logits["B"]
-                target_progress_B = inputs["target_progress_B"]
-                target_progress_B_mask = inputs["target_progress_B_mask"].unsqueeze(-1) * labeled_progress_b_mask
-                predict_last_frame_mask_B = inputs["predict_last_frame_mask_B"]
-                progress_loss_B, _spearman_corr_B, _progress_metrics_B = self._compute_progress_loss_helper(
-                    progress_pred_B,
-                    target_progress_B,
-                    target_progress_B_mask,
-                    predict_last_frame_mask=predict_last_frame_mask_B,
-                )
-                final_loss += progress_loss_B
-
         if self.config.model.train_success_head:
             success_logits = model_outputs.success_logits
             success_logits = success_logits["A"]
@@ -2540,26 +2508,6 @@ class RBMHeadsTrainer(Trainer):
                 final_loss += success_loss
             else:
                 logger.warning(f"NaN detected in success loss")
-
-            labeled_success_b_mask = self._build_labeled_progress_row_mask(
-                inputs.get("trajectory_B_data_source"),
-                success_logits.device,
-            )
-            if labeled_success_b_mask is not None and model_outputs.success_logits["B"] is not None:
-                success_logits_B = model_outputs.success_logits["B"]
-                success_labels_B = inputs["success_labels_B"]
-                quality_labels_B = inputs.get("trajectory_B_quality_label", None)
-                target_progress_B = inputs["target_progress_B"]
-                target_progress_B_mask = inputs["target_progress_B_mask"].unsqueeze(-1) * labeled_success_b_mask
-                success_loss_B, _success_accuracy_B, _success_auprc_B, _success_metrics_B = self._compute_success_loss_helper(
-                    success_logits_B,
-                    target_progress_B,
-                    success_labels_B,
-                    progress_loss_mask=target_progress_B_mask,
-                    quality_labels=quality_labels_B,
-                )
-                if not torch.isnan(success_loss_B).any():
-                    final_loss += success_loss_B
 
         # Check for NaN in final loss
         if torch.isnan(final_loss).any():
