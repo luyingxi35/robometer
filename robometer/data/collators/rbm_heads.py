@@ -43,6 +43,12 @@ def _resize_pil(pil: Image.Image, max_side: int = MAX_IMAGE_SIDE, max_pixels: in
     return pil
 
 
+def _resize_pil_exact(pil: Image.Image, width: int, height: int) -> Image.Image:
+    """Resize an image to an exact size when the config explicitly requests it."""
+    pil = pil.convert("RGB")
+    return pil.resize((width, height), resample=Image.BICUBIC)
+
+
 def should_compute_progress(
     quality_label: str,
     data_gen_strategy: str,
@@ -185,15 +191,15 @@ class RBMBatchCollator(BaseCollator):
                 - content_extras: Dictionary with resized_height/width or empty dict
         """
         if self.use_multi_image:
-            # # Use images directly - return list of PIL Images
-            # if self.resized_height is not None and self.resized_width is not None:
-            #     content_extras = {
-            #         "resized_height": self.resized_height,
-            #         "resized_width": self.resized_width,
-            #     }
-            # else:
-            #     frames = [_resize_pil(frame) for frame in frames]
-            #     content_extras = {}
+            # In multi-image mode, cap image resolution before passing frames to Qwen.
+            # Otherwise the processor receives full-resolution frames and vision tokens
+            # can explode enough to OOM even with FSDP.
+            if self.resized_height is not None and self.resized_width is not None:
+                frames = [
+                    _resize_pil_exact(frame, width=self.resized_width, height=self.resized_height) for frame in frames
+                ]
+            else:
+                frames = [_resize_pil(frame) for frame in frames]
             content_extras = {}
             return frames, content_extras
         elif "Qwen" in self.base_model_id or "Molmo" in self.base_model_id:

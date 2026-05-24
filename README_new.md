@@ -2,17 +2,18 @@
 1. Training: 
 ```
 cd robometer
-CUDA_VISIBLE_DEVICES=0 uv run accelerate launch \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run accelerate launch \
   --config_file robometer/configs/distributed/fsdp.yaml \
-  --num_processes=1 \
+  --num_processes=8 \
   train.py \
   data.train_datasets=[local/PegInsertionVertical-v1_hf_dataset] \
-  data.eval_datasets=[local/PegInsertionVertical-v1_hf_dataset] 
-  data.labeled_progress_data_sources=[gen_progress_success,gen_progress_failure] \
+  data.eval_datasets=[local/PegInsertionVertical-v1_hf_dataset] \
+  training.per_device_train_batch_size=1 \
+  training.per_device_eval_batch_size=1 \
+  training.gradient_accumulation_steps=16 \
   data.max_frames=8 \
-  model.train_progress_head=true \
-  model.train_preference_head=true \
-  model.train_success_head=true \
-  training.predict_pref_progress=true \
-  training.max_steps=15000
+  data.resized_height=224 \
+  data.resized_width=224 \
+  logging.log_to=[]
 ```

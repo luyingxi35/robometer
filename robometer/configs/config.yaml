@@ -74,9 +74,9 @@ data:
 
   # Video processing settings
   max_frames_after_preprocessing: 64
-  max_frames: 16  # Maximum frames per trajectory
-  resized_height: null # Height to resize images/videos to
-  resized_width: null   # Width to resize images/videos to
+  max_frames: 8  # Maximum frames per trajectory
+  resized_height: 224 # Height to resize images/videos to
+  resized_width: 224   # Width to resize images/videos to
   load_embeddings: false
   min_frames_per_trajectory: 5 # Minimum number of frames required per trajectory (trajectories with fewer frames will be filtered out)
   use_multi_image: true # If True, feed frames as a list of images instead of converting to video (avoids encoding overhead)
@@ -159,7 +159,7 @@ training:
   overwrite_output_dir: true  # If true, overwrite output directory if it exists (works with accelerate/distributed training)
   
   # Training parameters
-  per_device_train_batch_size: 16
+  per_device_train_batch_size: 4
   gradient_accumulation_steps: 1
   learning_rate: 2e-5
   num_train_epochs: -1  # Number of epochs to train for
