@@ -9,3 +9,4 @@ robometer/Robometer-4B
 .venv
 logs/
 wandb/
+memory_log_rank*
