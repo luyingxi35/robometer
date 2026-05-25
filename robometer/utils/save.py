@@ -803,6 +803,50 @@ class SaveBestCallback(TrainerCallback):
         self._cleanup_memory()
 
 
+class CleanupNonSavingIntervalCheckpointsCallback(TrainerCallback):
+    """
+    Keep temporary Trainer step checkpoints between larger save intervals.
+
+    Example with save_steps=50 and keep_multiple=100:
+    - checkpoint-50 is kept temporarily
+    - checkpoint-100 is saved, then checkpoint-50 is deleted
+    - checkpoint-150 is kept temporarily
+    - checkpoint-200 is saved, then checkpoint-150 is deleted
+
+    This leaves only checkpoints on the larger interval long-term while still
+    allowing resume from the most recent half-interval checkpoint.
+    """
+
+    def __init__(self, keep_multiple: int | None = None):
+        super().__init__()
+        self.keep_multiple = keep_multiple
+
+    def on_save(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        step = state.global_step
+
+        if not self.keep_multiple or self.keep_multiple <= 0 or step <= 0:
+            return control
+
+        if step % self.keep_multiple != 0:
+            return control
+
+        previous_step = step - args.save_steps
+        if previous_step <= 0:
+            return control
+
+        if previous_step % self.keep_multiple == 0:
+            return control
+
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{previous_step}")
+        if os.path.isdir(ckpt_dir):
+            logger.info(
+                f"🗑️ Removing temporary Trainer checkpoint {ckpt_dir} after saving aligned checkpoint at step {step}"
+            )
+            shutil.rmtree(ckpt_dir, ignore_errors=True)
+
+        return control
+
+
 def load_model_from_hf(
     model_path: str,
     device: torch.device,

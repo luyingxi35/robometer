@@ -155,17 +155,18 @@ custom_eval:
 # =====================================================================================
 training:  
   # Output and logging
-  output_dir: "./logs"
+  output_dir: "/data/yingxi/robometer/logs"
   overwrite_output_dir: true  # If true, overwrite output directory if it exists (works with accelerate/distributed training)
   
   # Training parameters
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 8
   gradient_accumulation_steps: 1
   learning_rate: 2e-5
   num_train_epochs: -1  # Number of epochs to train for
   save_strategy: "no"
   logging_steps: 1
-  save_steps: 200
+  save_steps: 20
+  save_total_limit: 2
   max_steps: 20000  # -1 means no limit, use num_train_epochs instead
   run_default_eval: false
   # weight_decay: 0.1
@@ -173,8 +174,8 @@ training:
   
   # Evaluation settings
   evaluation_strategy: "steps"  # Options: "no", "steps", "epoch"
-  eval_steps: 250  
-  custom_eval_steps: 250
+  eval_steps: 1000000  
+  custom_eval_steps: 1000000
   # eval_epochs: 100  
   per_device_eval_batch_size: 16  # Evaluation batch size per device
   do_eval: true  # Enable evaluation during training
@@ -247,7 +248,7 @@ logging:
 
     greater_is_better: [true, true, true, true, true]  # Whether higher values are better for each metric (must match metric_names length)
     keep_top_k: 5  # Number of best checkpoints and uploads to keep
-    save_every: 1000  # Save 'latest' checkpoint every N steps (should be multiple of custom_eval_steps). Set to null to disable.
+    save_every: 100  # Save 'latest' checkpoint every N steps (should be multiple of custom_eval_steps). Set to null to disable.
     
     # Hub upload configuration (optional)
     upload_to_hub: false   # Whether to upload best models to HuggingFace Hub

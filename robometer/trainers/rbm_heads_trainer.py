@@ -1851,6 +1851,11 @@ class RBMHeadsTrainer(Trainer):
             logger.warning(f"NaN detected in total_loss, replacing with 0.0")
             total_loss = torch.tensor(0.0, device=total_loss.device, dtype=total_loss.dtype)
 
+        metric_prefix = "train" if training else "eval"
+        log_metadata[f"{metric_prefix}/loss"] = total_loss.item()
+        if training:
+            log_metadata["loss"] = total_loss.item()
+
         # Always store custom losses for logging (even when return_outputs=False)
         self.log_metadata = log_metadata
 

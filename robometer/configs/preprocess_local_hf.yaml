@@ -2,7 +2,7 @@
 # Input datasets must be load_from_disk directories (e.g., .../hf_dataset)
 
 dataset_roots:
-  - "mani_envs/data_collection/progress_collection_randomized_v1/PegInsertionVertical-v1/hf_dataset"
+  - "/data/yingxi/robometer/data_success_failure/PegInsertionVertical-v1/hf_dataset/"
 
 # Optional names for each dataset root. If empty, inferred from path.
 dataset_names: []

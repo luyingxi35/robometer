@@ -1309,6 +1309,7 @@ def create_training_arguments(cfg: TrainingConfig, output_dir: str, is_eval: boo
         "save_strategy": cfg.save_strategy,
         "logging_steps": cfg.logging_steps,
         "save_steps": cfg.save_steps,
+        "save_total_limit": cfg.save_total_limit,
         "bf16": cfg.bf16,
         "fp16": cfg.fp16,
         "remove_unused_columns": cfg.remove_unused_columns,
@@ -1317,7 +1318,6 @@ def create_training_arguments(cfg: TrainingConfig, output_dir: str, is_eval: boo
         "dataloader_num_workers": cfg.dataloader_num_workers,
         "dataloader_persistent_workers": cfg.dataloader_persistent_workers,
         "save_safetensors": True,
-        "save_total_limit": 2,
         # Evaluation settings
         "eval_strategy": cfg.evaluation_strategy,
         "per_device_eval_batch_size": cfg.per_device_eval_batch_size,

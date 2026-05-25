@@ -359,15 +359,34 @@ class LocalHFDatasetPreprocessor:
 
         idxs = list(range(len(dataset)))
         results: dict[int, dict[str, Any]] = {}
+        skipped: list[tuple[int, str, str]] = []
 
         with ThreadPoolExecutor(max_workers=self.config.num_threads) as executor:
-            futures = [executor.submit(process_one, i) for i in idxs]
-            for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {cache_key}", unit="traj"):
-                i, out = fut.result()
-                results[i] = out
+            future_to_idx = {executor.submit(process_one, i): i for i in idxs}
+            for fut in tqdm(as_completed(future_to_idx), total=len(future_to_idx), desc=f"Processing {cache_key}", unit="traj"):
+                i = future_to_idx[fut]
+                try:
+                    _, out = fut.result()
+                    results[i] = out
+                except Exception as exc:
+                    ex_id = f"row_{i}"
+                    try:
+                        ex = dataset[i]
+                        ex_id = str(ex.get("id", ex_id))
+                    except Exception:
+                        pass
+                    skipped.append((i, ex_id, str(exc)))
 
         # Keep original order
-        rows = [results[i] for i in idxs]
+        rows = [results[i] for i in idxs if i in results]
+        if skipped:
+            rank_0_print(f"  Skipped {len(skipped)} invalid trajectories while processing {cache_key}")
+            for skipped_idx, ex_id, err in skipped[:10]:
+                rank_0_print(f"    - row={skipped_idx} id={ex_id}: {err}")
+            if len(skipped) > 10:
+                rank_0_print(f"    ... and {len(skipped) - 10} more skipped trajectories")
+        if not rows:
+            raise RuntimeError(f"All trajectories were skipped for dataset {cache_key}")
         processed_dataset = Dataset.from_list(rows)
 
         # Keep lang_vector type stable for downstream

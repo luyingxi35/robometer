@@ -32,6 +32,7 @@ from robometer.utils.config_utils import convert_hydra_to_dataclass, display_con
 from robometer.utils.distributed import banner, is_rank_0
 from robometer.utils.logger import Logger, rank_0_info
 from robometer.utils.save import (
+    CleanupNonSavingIntervalCheckpointsCallback,
     SaveBestCallback,
     resolve_checkpoint_path,
     save_final_checkpoint,
@@ -254,6 +255,7 @@ def train(cfg: ExperimentConfig):
         **asdict(save_best_cfg),
         base_model=cfg.model.base_model_id,
     )
+    cleanup_callback = CleanupNonSavingIntervalCheckpointsCallback(keep_multiple=100)
 
     trainer = trainer_cls(
         model=peft_rbm_model,
@@ -263,7 +265,7 @@ def train(cfg: ExperimentConfig):
         data_collator=batch_collator,
         config=cfg,
         logger=logger,
-        callbacks=[save_callback],
+        callbacks=[save_callback, cleanup_callback],
     )
 
     # Set trainer reference in the callback so it can access trainer methods
