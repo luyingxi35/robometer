@@ -165,8 +165,12 @@ training:
   num_train_epochs: -1  # Number of epochs to train for
   save_strategy: "no"
   logging_steps: 1
+<<<<<<< HEAD
   save_steps: 20
   save_total_limit: 2
+=======
+  save_steps: 1
+>>>>>>> 36929a977c16a25b9da88bf0c56d3f05945a514c
   max_steps: 20000  # -1 means no limit, use num_train_epochs instead
   run_default_eval: false
   # weight_decay: 0.1
@@ -232,10 +236,13 @@ loss:
 logging:
   save_model: true
   save_processor: true
+  log_train_memory: false
   log_to: [wandb]
   wandb_project: "robometer"
   wandb_entity: yingxilu512-tsinghua-university
   wandb_notes: "training Robometer"
+  # Wandb training scalars follow training.logging_steps (default 1, so every step).
+  # Eval/custom-eval scalars follow training.eval_steps and training.custom_eval_steps.
   
   # SaveBestCallback configuration
   save_best:

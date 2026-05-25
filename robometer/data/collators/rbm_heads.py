@@ -560,8 +560,6 @@ class RBMBatchCollator(BaseCollator):
 
         batch_inputs["trajectory_A_quality_label"] = [traj.quality_label for traj in trajectory_A_list]
         batch_inputs["trajectory_A_data_source"] = [traj.data_source for traj in trajectory_A_list]
-        batch_inputs["trajectory_B_quality_label"] = [traj.quality_label for traj in trajectory_B_list]
-        batch_inputs["trajectory_B_data_source"] = [traj.data_source for traj in trajectory_B_list]
 
         trajectory_A_data_gen_strategy = []
         trajectory_B_data_gen_strategy = []
@@ -675,8 +673,6 @@ class RBMBatchCollator(BaseCollator):
         # Aggregate success labels for trajectory A from trajectories
         success_label_A_list = [traj.success_label for traj in trajectory_A_list]
         batch_inputs["success_labels_A"] = pad_list_to_max(success_label_A_list)
-        success_label_B_list = [traj.success_label for traj in trajectory_B_list]
-        batch_inputs["success_labels_B"] = pad_list_to_max(success_label_B_list)
 
         # Add metadata structure for evaluation
         metadata_list = []
