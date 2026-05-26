@@ -8,6 +8,14 @@ uv run python scripts/split_local_hf_dataset.py \
   --eval-output /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_eval \
   --seed 42
 ```
+Check data before training and evaluation:
+```
+uv run python /root/RoboFPE/mani_envs/data_collection/visualize_random_progress_samples.py \
+  --dataset /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_train \
+  --num-samples 20 \
+  --seed 0 \
+  --output-dir ../mani_envs/data_collection/plots
+```
 2. Data preprocessing:
 ```
 # Process train split
