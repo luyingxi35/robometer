@@ -34,3 +34,16 @@ uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py 
     max_frames=8 \
     model_config.batch_size=32
 ```
+Compare oracle with baseline:
+```
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py \
+    reward_model=rbm \
+    model_path=/data/yingxi/robometer/logs/rbm/checkpoint-800/ \
+    custom_eval.use_frame_steps=true \
+    custom_eval.subsample_n_frames=10\
+    custom_eval.reward_alignment_max_trajectories=30 \
+    max_frames=8 \
+    model_config.batch_size=32
+```
