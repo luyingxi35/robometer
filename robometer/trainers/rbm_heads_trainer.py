@@ -1881,10 +1881,6 @@ class RBMHeadsTrainer(Trainer):
         """
         # Get base thresholds from config
         min_success = self.config.data.min_success
-        is_labeled_progress_quality = False
-        if quality_labels:
-            is_labeled_progress_quality = any(label in LABELED_PROGRESS_QUALITY_LABELS for label in quality_labels if label is not None)
-
         # Handle Qwen/Molmo downsampling: take every 2nd frame if using Qwen/Molmo and NOT using multi_image
         # In multi_image mode, we already get one embedding per frame, so no downsampling needed
         # Ensure success_logits matches target_progress length after downsampling
@@ -1925,11 +1921,8 @@ class RBMHeadsTrainer(Trainer):
                 target_progress, num_bins=self.config.loss.progress_discrete_bins
             )
 
-        if is_labeled_progress_quality:
-            combined_mask = torch.ones_like(success_labels, dtype=torch.float32, device=success_logits.device)
-        else:
-            # We predict success for frames where progress < min_success or the frame is a success
-            combined_mask = ((target_progress < min_success) | (success_labels > 0.5)).float()
+        # We predict success for frames where progress < min_success or the frame is a success
+        combined_mask = ((target_progress < min_success) | (success_labels > 0.5)).float()
 
         # Incorporate quality mask: always include all frames for suboptimal/failure trajectories
         if quality_mask is not None:

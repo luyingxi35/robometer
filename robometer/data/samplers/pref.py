@@ -100,80 +100,59 @@ class PrefSampler(RBMBaseSampler):
         if quality_label not in self.labeled_quality_order:
             return None
 
-        if preferred_strategy == DataGenStrat.REWIND and getattr(self.config, "labeled_progress_disable_rewind", True):
+        allowed_quality_labels = {"successful_labeled", "suboptimal_labeled", "failure_labeled"}
+        if quality_label not in allowed_quality_labels:
             return None
 
+        if preferred_strategy in {DataGenStrat.REWIND, DataGenStrat.REVERSE_PROGRESS}:
+            raise ValueError(
+                f"Labeled-progress trajectory {item.get('id')} does not allow rejected strategy "
+                f"{preferred_strategy.value}; only same-task quality pairing or different_task are supported."
+            )
+
         if preferred_strategy is None:
-            strategy_candidates: list[tuple[DataGenStrat, float]] = []
-            same_task_weight = 0.0
-            if len(self.preference_strategy_ratio) > 1:
-                same_task_weight += self.preference_strategy_ratio[1]
-            if len(self.preference_strategy_ratio) > 3:
-                same_task_weight += self.preference_strategy_ratio[3]
-            if same_task_weight > 0:
-                strategy_candidates.append((DataGenStrat.SUBOPTIMAL, same_task_weight))
-            if len(self.preference_strategy_ratio) > 2 and self.preference_strategy_ratio[2] > 0:
-                strategy_candidates.append((DataGenStrat.DIFFERENT_TASK, self.preference_strategy_ratio[2]))
-            if strategy_candidates:
-                total = sum(weight for _, weight in strategy_candidates)
-                draw = random.random() * total
-                cumulative = 0.0
-                for strategy, weight in strategy_candidates:
-                    cumulative += weight
-                    if draw <= cumulative:
-                        preferred_strategy = strategy
-                        break
-            if preferred_strategy is None:
-                preferred_strategy = DataGenStrat.SUBOPTIMAL
+            preferred_strategy = DataGenStrat.SUBOPTIMAL
+
+        if preferred_strategy == DataGenStrat.SUBOPTIMAL:
+            task_name = item["task"]
+            same_task_indices = self.task_indices.get(task_name, [])
+            if same_task_indices and quality_label in {"successful_labeled", "suboptimal_labeled"}:
+                failure_indices = []
+                for idx in same_task_indices:
+                    candidate = self.dataset[idx]
+                    if candidate.get("id") == item.get('id'):
+                        continue
+                    if candidate.get("quality_label") == "failure_labeled":
+                        failure_indices.append(idx)
+
+                if failure_indices:
+                    chosen_traj_dict = item
+                    rejected_traj_dict = self.dataset[random.choice(failure_indices)]
+                    chosen_trajectory = self._get_traj_from_data(chosen_traj_dict, subsample_strategy="subsample_forward")
+                    rejected_trajectory = self._get_traj_from_data(rejected_traj_dict, subsample_strategy="subsample_forward")
+                    if chosen_trajectory is None or rejected_trajectory is None:
+                        return None
+
+                    return PreferenceSample(
+                        chosen_trajectory=chosen_trajectory,
+                        rejected_trajectory=rejected_trajectory,
+                        data_gen_strategy=DataGenStrat.SUBOPTIMAL.value,
+                    )
+
+            preferred_strategy = DataGenStrat.DIFFERENT_TASK
 
         if preferred_strategy == DataGenStrat.DIFFERENT_TASK:
             sample = self._create_pref_sample(item, preferred_strategy=preferred_strategy)
             if sample is not None:
                 return sample
+            raise ValueError(
+                f"Labeled-progress trajectory {item.get('id')} could not form a legal rejected pair: "
+                "no allowed same-task failure_labeled match and different_task generation failed."
+            )
 
-        task_name = item["task"]
-        same_task_indices = self.task_indices.get(task_name, [])
-        if not same_task_indices:
-            return None
-
-        ref_rank = self.labeled_quality_order[quality_label]
-        higher_indices = []
-        lower_indices = []
-        for idx in same_task_indices:
-            candidate = self.dataset[idx]
-            candidate_quality = candidate.get("quality_label")
-            if candidate_quality not in self.labeled_quality_order:
-                continue
-            if candidate.get("id") == item.get("id"):
-                continue
-            candidate_rank = self.labeled_quality_order[candidate_quality]
-            if candidate_rank > ref_rank:
-                higher_indices.append(idx)
-            elif candidate_rank < ref_rank:
-                lower_indices.append(idx)
-
-        chosen_traj_dict = None
-        rejected_traj_dict = None
-        if higher_indices:
-            chosen_traj_dict = self.dataset[random.choice(higher_indices)]
-            rejected_traj_dict = item
-        elif lower_indices:
-            chosen_traj_dict = item
-            rejected_traj_dict = self.dataset[random.choice(lower_indices)]
-        elif preferred_strategy == DataGenStrat.DIFFERENT_TASK:
-            return self._create_pref_sample(item, preferred_strategy=preferred_strategy)
-        else:
-            return None
-
-        chosen_trajectory = self._get_traj_from_data(chosen_traj_dict, subsample_strategy="subsample_forward")
-        rejected_trajectory = self._get_traj_from_data(rejected_traj_dict, subsample_strategy="subsample_forward")
-        if chosen_trajectory is None or rejected_trajectory is None:
-            return None
-
-        return PreferenceSample(
-            chosen_trajectory=chosen_trajectory,
-            rejected_trajectory=rejected_trajectory,
-            data_gen_strategy=DataGenStrat.SUBOPTIMAL.value,
+        raise ValueError(
+            f"Labeled-progress trajectory {item.get('id')} received unsupported preferred strategy "
+            f"{preferred_strategy.value}; only suboptimal(same-task quality) and different_task are allowed."
         )
 
     def _execute_strategy(
