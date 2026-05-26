@@ -40,6 +40,7 @@ from robometer.evals.baselines.roboreward import RoboReward
 from robometer.evals.baselines.topreward import TopReward
 from robometer.evals.baselines.vlac import VLAC
 from robometer.utils.config_utils import convert_hydra_to_dataclass, display_config
+from robometer.evals.eval_metrics_utils import compute_pearson
 from robometer.utils.distributed import is_rank_0
 from robometer.utils.logger import get_logger
 from robometer.data.dataset_types import ProgressSample
@@ -209,6 +210,54 @@ def _initialize_model(cfg: BaselineEvalConfig):
     )
 
 
+def _normalize_eval_results_quality_labels(
+    eval_results: List[Dict[str, Any]],
+    normalized_label: str,
+) -> List[Dict[str, Any]]:
+    normalized_results: List[Dict[str, Any]] = []
+    for result in eval_results:
+        updated_result = copy.deepcopy(result)
+        raw_quality_label = updated_result.get("quality_label")
+        updated_result["raw_quality_label"] = raw_quality_label
+        updated_result["quality_label"] = normalized_label
+        normalized_results.append(updated_result)
+    return normalized_results
+
+
+def _compute_per_class_reward_alignment_metrics(eval_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped_results: Dict[str, List[Dict[str, Any]]] = {}
+    for result in eval_results:
+        trajectory_id = result.get("id")
+        if not trajectory_id:
+            continue
+        grouped_results.setdefault(trajectory_id, []).append(result)
+
+    loss_values: List[float] = []
+    pearson_values: List[float] = []
+
+    for trajectory_id, trajectory_results in grouped_results.items():
+        trajectory_results.sort(key=lambda r: r.get("metadata", {}).get("frame_step", 0))
+        traj_preds = np.array([row["progress_pred"][-1] for row in trajectory_results], dtype=float)
+        traj_targets = np.array([row["target_progress"][-1] for row in trajectory_results], dtype=float)
+
+        if traj_preds.size == 0 or traj_targets.size == 0 or traj_preds.size != traj_targets.size:
+            continue
+
+        loss_values.append(float(np.mean((traj_targets - traj_preds) ** 2)))
+
+        pearson_value = compute_pearson(traj_targets.tolist(), traj_preds.tolist())
+        if not np.isnan(pearson_value):
+            pearson_values.append(float(pearson_value))
+
+    metrics: Dict[str, Any] = {
+        "num_trajectories": len(grouped_results),
+        "num_results": len(eval_results),
+        "loss": float(np.mean(loss_values)) if loss_values else None,
+        "pearson": float(np.mean(pearson_values)) if pearson_values else None,
+    }
+    return metrics
+
+
 def _process_reward_alignment_dataset(
     cfg: BaselineEvalConfig,
     sampler: Any,
@@ -310,6 +359,7 @@ def _run_per_class_reward_alignment(
         )
 
         eval_results = _process_reward_alignment_dataset(cfg, sampler, model)
+        eval_results = _normalize_eval_results_quality_labels(eval_results, normalized_label)
         class_report["results_count"] = len(eval_results)
 
         if not eval_results:
@@ -318,7 +368,7 @@ def _run_per_class_reward_alignment(
             continue
 
         data_source = eval_results[0].get("data_source")
-        metrics_dict, plots, video_frames_list, _ = run_reward_alignment_eval_per_trajectory(
+        _, plots, video_frames_list, _ = run_reward_alignment_eval_per_trajectory(
             results=eval_results,
             progress_pred_type="absolute_wrt_total_frames",
             is_discrete_mode=False,
@@ -328,6 +378,7 @@ def _run_per_class_reward_alignment(
             train_success_head=False,
             last_frame_only=False,
         )
+        metrics_dict = _compute_per_class_reward_alignment_metrics(eval_results)
 
         _save_class_outputs(
             class_output_dir=class_output_dir,
