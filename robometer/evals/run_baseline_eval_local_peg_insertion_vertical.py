@@ -749,6 +749,7 @@ def main(cfg: DictConfig):
     data_cfg = DataConfig(
         max_frames=baseline_cfg.max_frames,
         load_embeddings=True if "rewind" in baseline_cfg.reward_model else False,
+        labeled_progress_data_sources=["gen_progress_success", "gen_progress_failure"],
     )
     display_config(data_cfg)
 

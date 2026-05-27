@@ -14,7 +14,7 @@ uv run python /root/RoboFPE/mani_envs/data_collection/visualize_random_progress_
   --dataset /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_train \
   --num-samples 20 \
   --seed 0 \
-  --output-dir ../mani_envs/data_collection/plots
+  --output-dir ../mani_envs/data_collection/plots_train
 ```
 2. Data preprocessing:
 ```
@@ -26,6 +26,14 @@ uv run python -m robometer.data.scripts.preprocess_local_hf_datasets  --config_p
 
 # Process eval split
 uv run python -m robometer.data.scripts.preprocess_local_hf_datasets  --config_path robometer/configs/preprocess_local_hf.yaml  --dataset_roots '["/data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_eval/"]'  --dataset_names '["local/PegInsertionVertical_eval"]'
+```
+Check processed data:
+```
+uv run python /root/RoboFPE/mani_envs/data_collection/visualize_processed_progress_samples.py \
+  --dataset /data/yingxi/robometer/local_PegInsertionVertical_train \
+  --num-samples 20 \
+  --seed 0 \
+  --output-dir ../mani_envs/data_collection/plots_cache_train
 ```
 3. Training: 
 ```
@@ -41,7 +49,7 @@ uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py 
     custom_eval.subsample_n_frames=5 \
     custom_eval.reward_alignment_max_trajectories=30 \
     max_frames=8 \
-    model_config.batch_size=32
+    model_config.batch_size=16
 ```
 Compare oracle with baseline:
 ```
@@ -54,5 +62,5 @@ uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py 
     custom_eval.subsample_n_frames=10\
     custom_eval.reward_alignment_max_trajectories=30 \
     max_frames=8 \
-    model_config.batch_size=32
+    model_config.batch_size=16
 ```
