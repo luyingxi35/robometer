@@ -92,7 +92,7 @@ data:
   preference_strategy_ratio: [1, 1, 1, 1]
   # Tunable strategy ratios for progress generation: [different_task, forward_progress, reverse_progress, rewind]
   progress_strategy_ratio: [1, 1, 1, 1]  # [different_task, forward_progress, reverse_progress, rewind]
-  labeled_progress_data_sources: []
+  labeled_progress_data_sources: ["gen_progress_success", "gen_progress_failure"]
   labeled_quality_order:
     successful_labeled: 2
     suboptimal_labeled: 1
