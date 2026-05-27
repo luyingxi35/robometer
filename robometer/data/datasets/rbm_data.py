@@ -37,8 +37,12 @@ class RBMDataset(BaseDataset):
 
         self.sample_type_ratio = config.sample_type_ratio
         self.max_samples = max_samples
+        self.is_evaluation = is_evaluation
 
-        self.data_len = len(self.dataset)
+        self.anchor_indices = self._build_anchor_indices()
+        self.data_len = len(self.anchor_indices)
+        if self.data_len == 0:
+            raise ValueError("Training anchor set is empty after excluding failure_labeled labeled-progress samples")
 
     def get_random_state(self) -> dict:
         """Get random state from all samplers for checkpointing.
@@ -69,6 +73,23 @@ class RBMDataset(BaseDataset):
     def get_resample_dataset_attempt_stats(self):
         return self._resample_dataset_attempt_stats
 
+    def _build_anchor_indices(self):
+        anchor_indices = list(range(len(self.dataset)))
+        if self.is_evaluation:
+            return anchor_indices
+
+        labeled_sources = set(getattr(self.config, "labeled_progress_data_sources", []) or [])
+        if not labeled_sources:
+            return anchor_indices
+
+        filtered_indices = []
+        for idx in anchor_indices:
+            item = self.dataset[idx]
+            if item.get("data_source") in labeled_sources and item.get("quality_label") == "failure_labeled":
+                continue
+            filtered_indices.append(idx)
+        return filtered_indices
+
     def __len__(self):
         if self.max_samples is None:
             return self.data_len
@@ -78,10 +99,11 @@ class RBMDataset(BaseDataset):
     def __getitem__(self, idx):
         """Create a data sample from the dataset."""
         idx = idx % self.data_len
-        logger.trace(f"[RBMDataset] __getitem__: Starting for idx={idx}")
+        actual_idx = self.anchor_indices[idx]
+        logger.trace(f"[RBMDataset] __getitem__: Starting for idx={idx}, actual_idx={actual_idx}")
 
         # Get the item from the filtered dataset
-        item = self.dataset[idx]
+        item = self.dataset[actual_idx]
         traj_id = item.get("id", "unknown")
         logger.trace(f"[RBMDataset] __getitem__: Got item with ID={traj_id}, calling _generate_sample_from_item")
 

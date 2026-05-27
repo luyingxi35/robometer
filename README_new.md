@@ -38,6 +38,10 @@ uv run python /root/RoboFPE/mani_envs/data_collection/visualize_processed_progre
 3. Training: 
 ```
 cd robometer
+
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True         uv run accelerate launch           --config_file robometer/configs/distributed/fsdp.yaml           --num_processes=4           train.py           data.train_datasets=[local/PegInsertionVertical_train]           data.eval_datasets=[local/PegInsertionVertical_eval]           training.per_device_train_batch_size=16           training.per_device_eval_batch_size=16           data.max_frames=8           data.resized_height=224           data.resized_width=224           training.save_strategy=steps           training.save_steps=50           training.save_total_limit=5           training.logging_steps=1           logging.log_to=[wandb]
 ```
 4. Evaluation
