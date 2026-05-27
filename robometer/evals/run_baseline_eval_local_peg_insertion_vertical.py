@@ -64,6 +64,12 @@ MODEL_COLORS = {
     "baseline": "#ff7f0e",
     "oracle": "#2ca02c",
 }
+METRIC_PLOT_COLORS = {
+    "robometer": "#6f8fa3",
+    "RoboFAPE": "#c48a74",
+    "missing": "#d8dde3",
+}
+QUALITY_DISPLAY_ORDER = ["success", "suboptimal", "failure"]
 
 
 def _ensure_required_combined_indices(combined_indices: Dict[str, Any]) -> Dict[str, Any]:
@@ -268,7 +274,7 @@ def _compute_per_class_reward_alignment_metrics(eval_results: List[Dict[str, Any
             continue
         grouped_results.setdefault(trajectory_id, []).append(result)
 
-    mse_values: List[float] = []
+    mae_values: List[float] = []
     spearman_values: List[float] = []
 
     for trajectory_results in grouped_results.values():
@@ -279,7 +285,7 @@ def _compute_per_class_reward_alignment_metrics(eval_results: List[Dict[str, Any
         if traj_preds.size == 0 or traj_targets.size == 0 or traj_preds.size != traj_targets.size:
             continue
 
-        mse_values.append(float(np.mean((traj_targets - traj_preds) ** 2)))
+        mae_values.append(float(np.mean(np.abs(traj_targets - traj_preds))))
 
         spearman_value = compute_spearman(traj_targets.tolist(), traj_preds.tolist())
         if not np.isnan(spearman_value):
@@ -289,7 +295,7 @@ def _compute_per_class_reward_alignment_metrics(eval_results: List[Dict[str, Any
         "num_trajectories": len(grouped_results),
         "num_results": len(eval_results),
         "num_valid_spearman_trajectories": len(spearman_values),
-        "mse": float(np.mean(mse_values)) if mse_values else None,
+        "mae": float(np.mean(mae_values)) if mae_values else None,
         "spearman": float(np.mean(spearman_values)) if spearman_values else None,
     }
 
@@ -394,27 +400,120 @@ def _plot_metric_comparison_bars(comparison_dir: str, comparison_report: Dict[st
     metrics_dir = os.path.join(comparison_dir, "metrics_plots")
     os.makedirs(metrics_dir, exist_ok=True)
 
-    for normalized_label, class_payload in comparison_report["per_class"].items():
-        baseline_metrics = class_payload["baseline"]["metrics"]
-        oracle_metrics = class_payload["oracle"]["metrics"]
-        metric_names = ["mse", "spearman"]
+    def _format_metric_value(value: Optional[float]) -> str:
+        return "N/A" if value is None else f"{value:.4f}"
 
-        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-        fig.suptitle(f"{normalized_label} metrics comparison", fontsize=12)
-        for ax, metric_name in zip(axes, metric_names):
-            baseline_value = baseline_metrics.get(metric_name)
-            oracle_value = oracle_metrics.get(metric_name)
-            values = [baseline_value if baseline_value is not None else 0.0, oracle_value if oracle_value is not None else 0.0]
-            colors = [MODEL_COLORS["baseline"], MODEL_COLORS["oracle"]]
-            labels = ["baseline", "oracle"]
-            bars = ax.bar(labels, values, color=colors)
-            ax.set_title(metric_name.upper())
-            ax.set_ylabel(metric_name)
-            for bar, value in zip(bars, [baseline_value, oracle_value]):
-                label = "None" if value is None else f"{value:.4f}"
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), label, ha="center", va="bottom", fontsize=8)
-        fig.tight_layout()
-        fig.savefig(os.path.join(metrics_dir, f"{normalized_label}_metrics_comparison.png"), dpi=180, bbox_inches="tight")
+    metric_specs = [
+        {
+            "key": "mae",
+            "title": "MAE by Quality",
+            "ylabel": "MAE",
+            "filename": "mae_comparison.png",
+            "ylim": None,
+        },
+        {
+            "key": "spearman",
+            "title": "Spearman by Quality",
+            "ylabel": "Spearman",
+            "filename": "spearman_comparison.png",
+            "ylim": (0.0, 1.0),
+        },
+    ]
+
+    x = np.arange(len(QUALITY_DISPLAY_ORDER))
+    width = 0.34
+
+    for metric_spec in metric_specs:
+        fig, ax = plt.subplots(figsize=(9.5, 5.4))
+        fig.patch.set_facecolor("#f6f4ef")
+        ax.set_facecolor("#fcfbf8")
+
+        baseline_values = []
+        oracle_values = []
+        baseline_raw_values = []
+        oracle_raw_values = []
+        baseline_colors = []
+        oracle_colors = []
+
+        for quality_label in QUALITY_DISPLAY_ORDER:
+            class_payload = comparison_report["per_class"].get(quality_label, {})
+            baseline_metric = class_payload.get("baseline", {}).get("metrics", {}).get(metric_spec["key"])
+            oracle_metric = class_payload.get("oracle", {}).get("metrics", {}).get(metric_spec["key"])
+
+            baseline_raw_values.append(baseline_metric)
+            oracle_raw_values.append(oracle_metric)
+            baseline_values.append(float(baseline_metric) if baseline_metric is not None else 0.0)
+            oracle_values.append(float(oracle_metric) if oracle_metric is not None else 0.0)
+            baseline_colors.append(
+                METRIC_PLOT_COLORS["robometer"] if baseline_metric is not None else METRIC_PLOT_COLORS["missing"]
+            )
+            oracle_colors.append(
+                METRIC_PLOT_COLORS["RoboFAPE"] if oracle_metric is not None else METRIC_PLOT_COLORS["missing"]
+            )
+
+        baseline_positions = x - width / 2
+        oracle_positions = x + width / 2
+
+        baseline_bars = ax.bar(
+            baseline_positions,
+            baseline_values,
+            width=width,
+            color=baseline_colors,
+            edgecolor="none",
+            label="robometer",
+            zorder=3,
+        )
+        oracle_bars = ax.bar(
+            oracle_positions,
+            oracle_values,
+            width=width,
+            color=oracle_colors,
+            edgecolor="none",
+            label="RoboFAPE",
+            zorder=3,
+        )
+
+        if metric_spec["ylim"] is not None:
+            ax.set_ylim(*metric_spec["ylim"])
+            value_span = metric_spec["ylim"][1] - metric_spec["ylim"][0]
+            text_offset = 0.025 * value_span
+        else:
+            combined_values = baseline_values + oracle_values
+            max_value = max(combined_values) if combined_values else 0.0
+            upper = max_value * 1.18 if max_value > 0 else 0.12
+            ax.set_ylim(0.0, upper)
+            text_offset = upper * 0.03
+
+        for bars, raw_values in ((baseline_bars, baseline_raw_values), (oracle_bars, oracle_raw_values)):
+            for bar, raw_value in zip(bars, raw_values):
+                bar_height = bar.get_height()
+                label_y = bar_height + text_offset
+                va = "bottom"
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    label_y,
+                    _format_metric_value(raw_value),
+                    ha="center",
+                    va=va,
+                    fontsize=9,
+                    color="#46525a",
+                )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([label.capitalize() for label in QUALITY_DISPLAY_ORDER], fontsize=10)
+        ax.set_ylabel(metric_spec["ylabel"], fontsize=11, color="#334047")
+        ax.set_title(metric_spec["title"], fontsize=14, color="#223039", pad=14)
+        ax.grid(axis="y", color="#d9ddd8", linewidth=0.8, alpha=0.8, zorder=0)
+        ax.tick_params(axis="y", labelsize=10, colors="#4f5d65")
+        ax.tick_params(axis="x", colors="#4f5d65")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#c0c7cc")
+        ax.spines["bottom"].set_color("#c0c7cc")
+        ax.legend(frameon=False, fontsize=10, loc="upper right")
+
+        fig.tight_layout(pad=1.4)
+        fig.savefig(os.path.join(metrics_dir, metric_spec["filename"]), dpi=200, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -619,10 +718,10 @@ def _run_dual_model_reward_alignment(
                 if baseline_metrics.get("spearman") is None or oracle_metrics.get("spearman") is None
                 else float(oracle_metrics["spearman"] - baseline_metrics["spearman"])
             ),
-            "delta_mse_baseline_minus_oracle": (
+            "delta_mae_baseline_minus_oracle": (
                 None
-                if baseline_metrics.get("mse") is None or oracle_metrics.get("mse") is None
-                else float(baseline_metrics["mse"] - oracle_metrics["mse"])
+                if baseline_metrics.get("mae") is None or oracle_metrics.get("mae") is None
+                else float(baseline_metrics["mae"] - oracle_metrics["mae"])
             ),
         }
 
@@ -701,7 +800,7 @@ def _write_comparison_report(
         "custom_eval": asdict(cfg.custom_eval) if hasattr(cfg.custom_eval, "__dataclass_fields__") else cfg.custom_eval,
         "delta_definition": {
             "spearman": "oracle - baseline",
-            "mse": "baseline - oracle",
+            "mae": "baseline - oracle",
         },
     }
 
