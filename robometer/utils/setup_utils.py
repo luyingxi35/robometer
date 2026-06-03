@@ -55,13 +55,17 @@ from robometer.utils.logger import get_logger
 logger = get_logger()
 from robometer.utils.save import parse_hf_model_id_and_revision, resolve_checkpoint_path
 
-try:
-    from unsloth import FastVisionModel
-except Exception as e:
-    FastVisionModel = None
-    _UNSLOTH_IMPORT_ERROR = e
-else:
-    _UNSLOTH_IMPORT_ERROR = None
+def _get_fast_vision_model():
+    """Import Unsloth only when the Unsloth loading path is actually used."""
+    try:
+        from unsloth import FastVisionModel
+    except Exception as e:
+        raise RuntimeError(
+            "Unsloth is enabled but could not be imported. Disable `model.use_unsloth` "
+            "for inference or install/run Unsloth in a supported GPU environment."
+        ) from e
+
+    return FastVisionModel
 
 
 def _get_rbm_peft_target(rbm_model: RBM) -> tuple[Optional[str], Optional[PeftModel]]:
@@ -503,11 +507,7 @@ def _load_base_model_with_unsloth(
         Tuple of (base_model, tokenizer)
     """
     logger.info("Using Unsloth for faster training with Qwen model")
-    if FastVisionModel is None:
-        raise RuntimeError(
-            "Unsloth is enabled but could not be imported. Disable `model.use_unsloth` "
-            "for inference or install/run Unsloth in a supported GPU environment."
-        ) from _UNSLOTH_IMPORT_ERROR
+    FastVisionModel = _get_fast_vision_model()
 
     # Load model with unsloth
     base_model, tokenizer = FastVisionModel.from_pretrained(

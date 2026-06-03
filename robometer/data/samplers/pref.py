@@ -31,6 +31,7 @@ class PrefSampler(RBMBaseSampler):
             any(len(indices) > 0 for indices in self.suboptimal_by_task.values()) if self.suboptimal_by_task else False
         )
         rank_0_info(f"[PREF SAMPLER] Has suboptimal: {self._has_suboptimal}")
+        self._build_labeled_progress_indices()
 
         # Initialize preference dataset
         self._load_preference_dataset()
@@ -50,9 +51,15 @@ class PrefSampler(RBMBaseSampler):
         use_partial_success = item.get("partial_success") is not None
 
         if self._is_labeled_progress_traj(item) and self._is_labeled_progress_quality(quality_label):
-            sample = self._create_labeled_progress_pref_sample(item, preferred_strategy=preferred_strategy)
-            if sample is not None:
-                return sample
+            if quality_label == "failure_labeled":
+                raise ValueError(
+                    f"Labeled-progress trajectory {item.get('id')} cannot be used as preferred anchor: "
+                    "failure_labeled samples are only valid as rejected candidates."
+                )
+            if quality_label in {"successful_labeled", "suboptimal_labeled"}:
+                sample = self._create_labeled_progress_pref_sample(item, preferred_strategy=preferred_strategy)
+                if sample is not None:
+                    return sample
 
         # Handle non-successful trajectories: use as rejected, find optimal from same task as chosen
         # skip this for trajectories with partial_success which we will handle with partial success logic
@@ -114,16 +121,9 @@ class PrefSampler(RBMBaseSampler):
             preferred_strategy = DataGenStrat.SUBOPTIMAL
 
         if preferred_strategy == DataGenStrat.SUBOPTIMAL:
-            task_name = item["task"]
-            same_task_indices = self.task_indices.get(task_name, [])
-            if same_task_indices and quality_label in {"successful_labeled", "suboptimal_labeled"}:
-                failure_indices = []
-                for idx in same_task_indices:
-                    candidate = self.dataset[idx]
-                    if candidate.get("id") == item.get('id'):
-                        continue
-                    if candidate.get("quality_label") == "failure_labeled":
-                        failure_indices.append(idx)
+            if quality_label in {"successful_labeled", "suboptimal_labeled"}:
+                ref_task_key = self._get_labeled_task_key(item)
+                failure_indices = self.labeled_failure_indices_by_task_key.get(ref_task_key, [])
 
                 if failure_indices:
                     chosen_traj_dict = item
@@ -142,7 +142,7 @@ class PrefSampler(RBMBaseSampler):
             preferred_strategy = DataGenStrat.DIFFERENT_TASK
 
         if preferred_strategy == DataGenStrat.DIFFERENT_TASK:
-            sample = self._create_pref_sample(item, preferred_strategy=preferred_strategy)
+            sample = self._create_labeled_different_task_pref_sample(item)
             if sample is not None:
                 return sample
             raise ValueError(
@@ -153,6 +153,85 @@ class PrefSampler(RBMBaseSampler):
         raise ValueError(
             f"Labeled-progress trajectory {item.get('id')} received unsupported preferred strategy "
             f"{preferred_strategy.value}; only suboptimal(same-task quality) and different_task are allowed."
+        )
+
+    def _get_labeled_task_key(self, traj: Dict[str, Any]) -> str:
+        """Return a stable task key for labeled-progress grouping.
+
+        Local generated progress datasets vary the natural-language instruction for the
+        same environment. Keep that text for prompting, but group samples by the
+        trajectory id prefix, e.g. PegInsertionVertical-v1_... -> PegInsertionVertical-v1.
+        """
+        traj_id = str(traj.get("id", ""))
+        if "_" in traj_id:
+            return traj_id.split("_", 1)[0]
+        return str(traj.get("task", "unknown"))
+
+    def _get_labeled_task_key_from_values(self, traj_id: Any, task: Any) -> str:
+        traj_id = str(traj_id or "")
+        if "_" in traj_id:
+            return traj_id.split("_", 1)[0]
+        return str(task or "unknown")
+
+    def _build_labeled_progress_indices(self) -> None:
+        self.labeled_indices_by_task_key: Dict[str, List[int]] = {}
+        self.labeled_failure_indices_by_task_key: Dict[str, List[int]] = {}
+
+        if not self.labeled_progress_data_sources:
+            self.labeled_task_keys = set()
+            return
+
+        ids = self.dataset["id"]
+        tasks = self.dataset["task"]
+        data_sources = self.dataset["data_source"]
+        quality_labels = self.dataset["quality_label"]
+
+        for idx, (traj_id, task, data_source, quality_label) in enumerate(
+            zip(ids, tasks, data_sources, quality_labels)
+        ):
+            if data_source not in self.labeled_progress_data_sources:
+                continue
+
+            task_key = self._get_labeled_task_key_from_values(traj_id, task)
+            self.labeled_indices_by_task_key.setdefault(task_key, []).append(idx)
+            if quality_label == "failure_labeled":
+                self.labeled_failure_indices_by_task_key.setdefault(task_key, []).append(idx)
+
+        self.labeled_task_keys = set(self.labeled_indices_by_task_key.keys())
+
+    def _get_labeled_same_task_indices(self, ref_traj: Dict[str, Any]) -> List[int]:
+        ref_task_key = self._get_labeled_task_key(ref_traj)
+        return self.labeled_indices_by_task_key.get(ref_task_key, [])
+
+    def _create_labeled_different_task_pref_sample(self, chosen_traj_dict: Dict[str, Any]) -> PreferenceSample | None:
+        chosen_task_key = self._get_labeled_task_key(chosen_traj_dict)
+        candidate_task_keys = [task_key for task_key in self.labeled_task_keys if task_key != chosen_task_key]
+        if not candidate_task_keys:
+            return None
+
+        rejected_task_key = random.choice(candidate_task_keys)
+        candidate_indices = self.labeled_indices_by_task_key.get(rejected_task_key, [])
+        if not candidate_indices:
+            return None
+
+        rejected_traj_dict = self.dataset[random.choice(candidate_indices)]
+        chosen_trajectory = self._get_traj_from_data(chosen_traj_dict, subsample_strategy="subsample_forward")
+        rejected_trajectory = self._get_traj_from_data(rejected_traj_dict, subsample_strategy="subsample_forward")
+        if chosen_trajectory is None or rejected_trajectory is None:
+            return None
+
+        rejected_trajectory.target_progress = [0.0] * len(rejected_trajectory.target_progress)
+        if self.config.progress_loss_type.lower() == "discrete":
+            rejected_trajectory.target_progress = convert_continuous_to_discrete_bins(
+                rejected_trajectory.target_progress, self.config.progress_discrete_bins
+            )
+        if rejected_trajectory.success_label is not None:
+            rejected_trajectory.success_label = [0.0] * len(rejected_trajectory.success_label)
+
+        return PreferenceSample(
+            chosen_trajectory=chosen_trajectory,
+            rejected_trajectory=rejected_trajectory,
+            data_gen_strategy=DataGenStrat.DIFFERENT_TASK.value,
         )
 
     def _execute_strategy(
