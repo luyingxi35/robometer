@@ -15,7 +15,7 @@ uv run python /root/RoboFPE/mani_envs/data_collection/visualize_random_progress_
   --num-samples 20 \
   --seed 0 \
   --output-dir ../mani_envs/data_collection/plots_train
-
+```
 2. Data preprocessing:
 ```
 export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
@@ -64,6 +64,20 @@ uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py 
     model_path=/data/yingxi/robometer/logs/rbm/checkpoint-800/ \
     custom_eval.use_frame_steps=true \
     custom_eval.subsample_n_frames=10\
+    custom_eval.reward_alignment_max_trajectories=30 \
+    max_frames=8 \
+    model_config.batch_size=16
+```
+Evaluate with real-world data:
+```
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
+uv run python robometer/evals/run_pred_visualization_no_labels.py \
+    reward_model=rbm \
+    model_path=/data/yingxi/robometer/logs/rbm/checkpoint-3700/ \
+    custom_eval.use_frame_steps=true \
+    custom_eval.subsample_n_frames=10 \
     custom_eval.reward_alignment_max_trajectories=30 \
     max_frames=8 \
     model_config.batch_size=16
