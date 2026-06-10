@@ -10,3 +10,5 @@ robometer/Robometer-4B
 logs/
 wandb/
 memory_log_rank*
+*.log
+*.bak

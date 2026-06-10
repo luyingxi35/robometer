@@ -893,15 +893,36 @@ def load_model_from_hf(
     resolved_path = Path(resolved_path)
 
     if resolved_path.exists():
-        # Local checkpoint: look for config.yaml
-        candidate_paths = [
-            resolved_path / "config.yaml",
-            resolved_path.parent / "config.yaml",
-        ]
+        # Local checkpoint: build candidate config.yaml paths.
+        # 1. Check ROBOMETER_CONFIG_YAML_PATH env var override first.
+        # 2. Walk up the directory tree and also check sibling subdirectories at
+        #    each level (handles cases where config.yaml lives in a sibling dir
+        #    like <root>/Robometer-4B/config.yaml next to <root>/logs/rbm/ckpt/).
+        candidate_paths = []
+
+        env_config = os.environ.get("ROBOMETER_CONFIG_YAML_PATH")
+        if env_config:
+            candidate_paths.append(Path(env_config))
+
+        current = resolved_path
+        for _ in range(6):
+            candidate_paths.append(current / "config.yaml")
+            # Also search immediate subdirectories (sibling configs at this level)
+            try:
+                for sibling_yaml in sorted(current.glob("*/config.yaml")):
+                    candidate_paths.append(sibling_yaml)
+            except (PermissionError, OSError):
+                pass
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
         config_path = None
         for candidate in candidate_paths:
-            if candidate.is_file():
-                config_path = candidate
+            if Path(candidate).is_file():
+                config_path = Path(candidate)
+                logger.info(f"Found config.yaml at: {config_path}")
                 break
 
         # If config.yaml not found locally, try to download it from Hub
@@ -929,7 +950,11 @@ def load_model_from_hf(
                         f"config.yaml not found locally and could not be downloaded from Hub: {e}"
                     ) from e
             else:
-                raise ValueError(f"config.yaml not found in checkpoint directory or parent directory: {resolved_path}")
+                raise ValueError(
+                    f"config.yaml not found in checkpoint directory, ancestor directories, or their "
+                    f"subdirectories: {resolved_path}. "
+                    f"Set ROBOMETER_CONFIG_YAML_PATH env var to specify its location explicitly."
+                )
     else:
         try:
             from huggingface_hub import hf_hub_download

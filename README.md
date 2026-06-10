@@ -29,10 +29,202 @@ robometer/
 │   ├── configs/            # Hydra and experiment configs
 │   ├── models/             # Model definitions
 │   └── evals/              # Baseline evals (GVL, VLAC, Robodopamine, etc.)
-├── eval_commands/          # Shell scripts for baseline evals
+├── evals/                  # Local eval & visualization scripts
+│   ├── run_pred_visualization_no_labels.py          # Single-checkpoint visualization (no GT)
+│   ├── run_baseline_eval_local_peg_insertion_vertical.py
+│   ├── combine_checkpoint_eval_plots.py             # Multi-checkpoint combined plots (no GT)
+│   └── combine_checkpoint_metric_plots.py           # Multi-checkpoint plots + metric summary
+├── scripts/
+│   ├── data/               # Dataset download, conversion, splitting
+│   ├── inference/          # Inference example scripts
+│   └── tools/              # Miscellaneous utilities
+├── eval_commands/          # Shell scripts for evals
+│   ├── reward_alignment.sh
+│   ├── policy_ranking.sh
+│   ├── confusion_matrix.sh
+│   ├── sweep_rbm_checkpoints_no_labels.sh           # Sweep all rbm/ checkpoints (no GT)
+│   └── sweep_rbm_checkpoints_with_metrics.sh        # Sweep all rbm/ checkpoints + metrics
 ├── train.py                # Training entrypoint
 └── pyproject.toml          # Dependencies (uv)
 ```
+
+---
+
+## 🔬 Local Fine-tuning Pipeline (PegInsertionVertical-v1)
+
+This section documents the end-to-end pipeline used for fine-tuning Robometer on locally collected peg-insertion trajectories.
+
+### Step 1 — Split training and evaluation data
+
+```bash
+cd ~/RoboFAC/robometer
+uv run python scripts/data/split_local_hf_dataset.py \
+  --input /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset \
+  --train-output /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_train \
+  --eval-output /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_eval \
+  --seed 42
+```
+
+Check data before training:
+```bash
+uv run python ../mani_envs/data_collection/visualize/visualize_random_progress_samples.py \
+  --dataset /data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_train \
+  --num-samples 20 \
+  --seed 0 \
+  --output-dir ../mani_envs/data_collection/outputs/plots_train
+```
+
+### Step 2 — Data preprocessing
+
+```bash
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
+# Process train split
+uv run python -m robometer.data.scripts.preprocess_local_hf_datasets \
+  --config_path robometer/configs/preprocess_local_hf.yaml \
+  --dataset_roots '["/data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_train/"]' \
+  --dataset_names '["local/PegInsertionVertical_train"]'
+
+# Process eval split
+uv run python -m robometer.data.scripts.preprocess_local_hf_datasets \
+  --config_path robometer/configs/preprocess_local_hf.yaml \
+  --dataset_roots '["/data/yingxi/robometer/progress_collection_randomized/PegInsertionVertical-v1/hf_dataset_eval/"]' \
+  --dataset_names '["local/PegInsertionVertical_eval"]'
+```
+
+Check processed data:
+```bash
+uv run python ../mani_envs/data_collection/visualize/visualize_processed_progress_samples.py \
+  --dataset /data/yingxi/robometer/local_PegInsertionVertical_train \
+  --num-samples 20 \
+  --seed 0 \
+  --output-dir ../mani_envs/data_collection/outputs/plots_cache_train
+```
+
+### Step 3 — Training
+
+```bash
+cd ~/RoboFAC/robometer
+
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+uv run accelerate launch \
+  --config_file robometer/configs/distributed/fsdp.yaml \
+  --num_processes=8 \
+  train.py \
+  data.train_datasets=[local/PegInsertionVertical_train] \
+  data.eval_datasets=[local/PegInsertionVertical_eval] \
+  training.per_device_train_batch_size=8 \
+  training.per_device_eval_batch_size=8 \
+  training.max_steps=800 \
+  data.max_frames=8 \
+  data.resized_height=224 \
+  data.resized_width=224 \
+  training.save_strategy=steps \
+  training.save_steps=50 \
+  training.save_total_limit=8 \
+  training.logging_steps=1 \
+  logging.log_to=[wandb]
+```
+
+### Step 4 — Evaluation
+
+**Evaluate pretrained Robometer-4B baseline:**
+```bash
+cd ~/RoboFAC/robometer
+uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py \
+  reward_model=rbm \
+  model_path=robometer/Robometer-4B \
+  custom_eval.use_frame_steps=true \
+  custom_eval.subsample_n_frames=5 \
+  custom_eval.reward_alignment_max_trajectories=30 \
+  max_frames=8 \
+  model_config.batch_size=16
+```
+
+**Compare oracle vs. fine-tuned checkpoint:**
+```bash
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
+uv run python robometer/evals/run_baseline_eval_local_peg_insertion_vertical.py \
+  reward_model=rbm \
+  model_path=/data/yingxi/robometer/logs/rbm/checkpoint-800/ \
+  custom_eval.use_frame_steps=true \
+  custom_eval.subsample_n_frames=10 \
+  custom_eval.reward_alignment_max_trajectories=30 \
+  max_frames=8 \
+  model_config.batch_size=16
+```
+
+**Evaluate with real-world data (no labels):**
+```bash
+export ROBOMETER_PROCESSED_DATASETS_PATH=/data/yingxi/robometer
+export HF_ENDPOINT=https://hf-mirror.com
+
+uv run python robometer/evals/run_pred_visualization_no_labels.py \
+  reward_model=rbm \
+  model_path=/data/yingxi/robometer/logs/rbm/checkpoint-3700/ \
+  custom_eval.use_frame_steps=true \
+  custom_eval.subsample_n_frames=10 \
+  custom_eval.reward_alignment_max_trajectories=30 \
+  max_frames=8 \
+  model_config.batch_size=16
+```
+
+### Step 5 — Multi-checkpoint sweep & visualization
+
+Evaluate **every** checkpoint under `logs/rbm/` in one shot and produce combined
+per-trajectory plots overlaying all checkpoints against the Robometer-4B baseline.
+Results are written to `/data/yingxi/robometer/all_checkpoint_eval_output*/`.
+
+**Option A — No GT labels (visualization only)**
+
+Runs `run_pred_visualization_no_labels.py` per checkpoint; combines predicted-progress
+curves (Blues palette, light→dark) + Robometer-4B baseline (orange) into one PNG per
+trajectory. Safe to interrupt and resume — already-evaluated checkpoints are skipped.
+
+```bash
+cd ~/RoboFAC/robometer
+bash eval_commands/sweep_rbm_checkpoints_no_labels.sh 2>&1 | tee eval_sweep_no_labels.log
+```
+
+To re-run only the plotting step (results already on disk):
+```bash
+cd ~/RoboFAC/robometer
+uv run python evals/combine_checkpoint_eval_plots.py \
+  --output-base /data/yingxi/robometer/all_checkpoint_eval_output
+```
+
+Output: `all_checkpoint_eval_output/combined_trajectory_plots/<trajectory_id>.png`
+
+---
+
+**Option B — With GT labels (Pearson / Loss metrics)**
+
+Runs `run_baseline_eval.py` per checkpoint (requires `target_progress` in dataset);
+additionally produces a `metric_vs_training_step.png` summary figure with one subplot
+per metric and the Robometer-4B baseline value as a horizontal dashed reference line.
+
+```bash
+cd ~/RoboFAC/robometer
+bash eval_commands/sweep_rbm_checkpoints_with_metrics.sh 2>&1 | tee eval_sweep_metrics.log
+```
+
+To re-run only the plotting step:
+```bash
+cd ~/RoboFAC/robometer
+uv run python evals/combine_checkpoint_metric_plots.py \
+  --output-base /data/yingxi/robometer/all_checkpoint_eval_output_metrics \
+  --baseline-dir /data/yingxi/robometer/all_checkpoint_eval_output_metrics/baseline_Robometer-4B
+```
+
+Output:
+- `all_checkpoint_eval_output_metrics/combined_trajectory_plots/<trajectory_id>.png`
+- `all_checkpoint_eval_output_metrics/metric_vs_training_step.png`
 
 ---
 
@@ -59,8 +251,8 @@ uv sync
 ```bash
 hf auth
 export ROBOMETER_PROCESSED_DATASETS_PATH=/path/to/save/processed_datasets
-./scripts/download_processed_datasets.sh
-./scripts/untar_processed_datasets.sh
+./scripts/data/download_processed_datasets.sh
+./scripts/data/untar_processed_datasets.sh
 ```
 
 For raw download and preprocessing, see [📥 Download raw datasets](#-download-raw-datasets-optional) below.
@@ -74,7 +266,7 @@ Inference runs a **pretrained RBM model** on your own videos to get per-frame pr
 **Pretrained models (Hugging Face):**
 
 - **[Robometer-4B](https://huggingface.co/robometer/Robometer-4B)** — general-purpose, trained on RBM-1M
-- **[Robometer-LIBERO](https://huggingface.co/jesbu1/robometer-4b-fft-libero)** - fine-tuned Robometer checkpoint on LIBERO-90, Object, Goal, Spatial, 10 + associated failure data. Try this if you need to do LIBERO-90 RL or if the default Robometer checkpoint doesn't perform as well.
+- **[Robometer-LIBERO](https://huggingface.co/jesbu1/robometer-4b-fft-libero)** - fine-tuned on LIBERO-90, Object, Goal, Spatial, 10 + associated failure data.
 
 ### Inference via HTTP server
 
@@ -90,21 +282,21 @@ Then run the client (no robometer dependency):
 
 ```bash
 # SOAR
-uv run python scripts/example_inference.py \
+uv run python scripts/inference/example_inference.py \
   --eval-server-url http://localhost:8000 \
   --video scripts/example_videos/soar_put_green_stick_in_brown_bowl.mp4 \
   --task "Put green stick in brown bowl" \
   --fps 3
 
 # Berkeley RPT (Wrist)
-uv run python scripts/example_inference.py \
+uv run python scripts/inference/example_inference.py \
   --eval-server-url http://localhost:8000 \
   --video scripts/example_videos/berkeley_rpt_stack_cup.mp4 \
   --task "Pick up the yellow cup and stack it on the other cup" \
   --fps 3
 
 # Your own video
-uv run python scripts/example_inference.py \
+uv run python scripts/inference/example_inference.py \
   --eval-server-url http://localhost:8000 \
   --video /path/to/video.mp4 \
   --task "your task description"
@@ -113,7 +305,7 @@ uv run python scripts/example_inference.py \
 To run the model locally (loads checkpoint from Hugging Face, no server):
 
 ```bash
-uv run python scripts/example_inference_local.py \
+uv run python scripts/inference/example_inference_local.py \
   --model-path robometer/Robometer-4B \
   --video /path/to/video.mp4 \
   --task "your task description"
@@ -123,14 +315,15 @@ uv run python scripts/example_inference_local.py \
 
 ## 🏋️ Training
 
-### Training
+### Train on RBM-1M
 
-**Train on RBM-1M in-distribution and evaluate on RBM-1M-OOD**
-First, modify `robometer/configs/config.yaml`'s `wandb_entity` flag to your WandB entity. To disable WandB logging, remove "wandb" from the `log_to` list in the config yaml file.
-See more flags in the config file (e.g., batch size, learning rates, etc.)
+First, modify `robometer/configs/config.yaml`'s `wandb_entity` flag to your WandB entity. To disable WandB logging, remove "wandb" from the `log_to` list.
 
 ```bash
-uv run accelerate launch --config_file robometer/configs/distributed/fsdp.yaml --num_processes=N_GPUS_YOU_HAVE train.py \
+uv run accelerate launch \
+  --config_file robometer/configs/distributed/fsdp.yaml \
+  --num_processes=N_GPUS_YOU_HAVE \
+  train.py \
   data.train_datasets=[rbm-1m-id] \
   data.eval_datasets=[rbm-1m-ood] \
   data.max_frames=8 \
@@ -139,16 +332,15 @@ uv run accelerate launch --config_file robometer/configs/distributed/fsdp.yaml -
   training.max_steps=15000 \
   custom_eval.reward_alignment=[rbm-1m-ood] \
   custom_eval.policy_ranking=[rbm-1m-ood] \
-  custom_eval.confusion_matrix=[rbm-1m-ood] \
-  logging.save_best.metric_names=[eval_p_rank/kendall_last_utd_so101_clean_top,eval_p_rank/kendall_last_usc_xarm,eval_p_rank/kendall_last_usc_franka,eval_p_rank/kendall_last_rfm_new_mit_franka_nowrist,eval_p_rank/kendall_last_usc_trossen] \
-  logging.save_best.greater_is_better=[True,True,True,True,True]
+  custom_eval.confusion_matrix=[rbm-1m-ood]
 ```
 
-**LIBERO: train on 10 / object / spatial / goal, test on 90.**
-First, modify `robometer/configs/config.yaml`'s `wandb_entity` flag to your WandB entity. To disable WandB logging, remove "wandb" from the `log_to` list in the config yaml file.
+### Train on LIBERO
 
 ```bash
-uv run accelerate launch --config_file robometer/configs/distributed/fsdp.yaml train.py \
+uv run accelerate launch \
+  --config_file robometer/configs/distributed/fsdp.yaml \
+  train.py \
   data.train_datasets=[libero_pi0] \
   data.eval_datasets=[libero_pi0] \
   data.max_frames=8 \
@@ -159,107 +351,94 @@ uv run accelerate launch --config_file robometer/configs/distributed/fsdp.yaml t
   custom_eval.policy_ranking=[libero_pi0]
 ```
 
-See `robometer/configs/experiment_configs.py` for more config options.
+See `robometer/configs/experiment_configs.py` for more options.
 
 ---
 
-## 🔧 LoRA fine-tune Robometer for new dataset
-
-Preprocess a new dataset, LoRA fine-tune from **Robometer-4B** on your own data, upload the model to the Hub, and run inference:
-
-- **Preprocessing:** Add your dataset to the preprocess config and run the preprocessor; for raw videos (e.g. [MINT-SJTU/RoboFAC-dataset](https://huggingface.co/datasets/MINT-SJTU/RoboFAC-dataset)), convert to RBM format first via `dataset_upload`, then preprocess.
-- **Fine-tuning:** Set `model.use_peft=true` and `training.load_from_checkpoint=robometer/Robometer-4B`, then train on your dataset.
-- **Upload & inference:** Use `robometer/utils/upload_to_hub.py` to push checkpoints; run `scripts/example_inference_local.py` with your Hub model.
+## 🔧 LoRA fine-tune Robometer for a new dataset
 
 Full step-by-step: **[FINETUNE_ROBOMETER.md](FINETUNE_ROBOMETER.md)**.
 
+- **Preprocessing:** Add your dataset to the preprocess config and run the preprocessor; for raw videos convert to RBM format first via `dataset_upload/`, then preprocess.
+- **Fine-tuning:** Set `model.use_peft=true` and `training.load_from_checkpoint=robometer/Robometer-4B`, then train on your dataset.
+- **Upload & inference:** Use `robometer/utils/upload_to_hub.py` to push checkpoints; run `scripts/inference/example_inference_local.py` with your Hub model.
+
 ---
 
-## 📊 Evaluation
+## 📊 Evaluation (benchmarks)
 
-Evaluation runs **benchmark evals** (reward alignment, policy ranking, confusion matrix) on fixed datasets to measure model quality. Use this to reproduce paper results or compare checkpoints.
-
-### Robometer evaluation
-
-Run RBM with `reward_model=rbm`; override `model_path` and `custom_eval.*` as needed. See `eval_commands/*.sh` for ReWIND, Robo-Dopamine, VLAC, RoboReward.
-
-**Reward alignment**
+### Reward alignment
 
 ```bash
 uv run python robometer/evals/run_baseline_eval.py \
-    reward_model=rbm \
-    model_path=robometer/Robometer-4B \
-    custom_eval.eval_types=[reward_alignment] \
-    custom_eval.reward_alignment=[rbm-1m-id,rbm-1m-ood] \
-    custom_eval.use_frame_steps=true \
-    custom_eval.subsample_n_frames=5 \
-    custom_eval.reward_alignment_max_trajectories=30 \
-    max_frames=8 \
-    model_config.batch_size=32
+  reward_model=rbm \
+  model_path=robometer/Robometer-4B \
+  custom_eval.eval_types=[reward_alignment] \
+  custom_eval.reward_alignment=[rbm-1m-id,rbm-1m-ood] \
+  custom_eval.use_frame_steps=true \
+  custom_eval.subsample_n_frames=5 \
+  custom_eval.reward_alignment_max_trajectories=30 \
+  max_frames=8 \
+  model_config.batch_size=32
 ```
 
-**Policy ranking**
+### Policy ranking
 
 ```bash
 uv run python robometer/evals/run_baseline_eval.py \
-    reward_model=rbm \
-    model_path=robometer/Robometer-4B \
-    custom_eval.eval_types=[policy_ranking] \
-    custom_eval.policy_ranking=[rbm-1m-ood] \
-    custom_eval.use_frame_steps=false \
-    custom_eval.num_examples_per_quality_pr=1000 \
-    max_frames=8 \
-    model_config.batch_size=32
+  reward_model=rbm \
+  model_path=robometer/Robometer-4B \
+  custom_eval.eval_types=[policy_ranking] \
+  custom_eval.policy_ranking=[rbm-1m-ood] \
+  custom_eval.use_frame_steps=false \
+  custom_eval.num_examples_per_quality_pr=1000 \
+  max_frames=8 \
+  model_config.batch_size=32
 ```
 
-**Confusion matrix**
+### Confusion matrix
 
 ```bash
 uv run python robometer/evals/run_baseline_eval.py \
-    reward_model=rbm \
-    model_path=robometer/Robometer-4B \
-    custom_eval.eval_types=[confusion_matrix] \
-    custom_eval.confusion_matrix=[[aliangdw_usc_franka_policy_ranking_usc_franka_policy_ranking,jesbu1_utd_so101_clean_policy_ranking_top_utd_so101_clean_policy_ranking_top,aliangdw_usc_xarm_policy_ranking_usc_xarm_policy_ranking]] \
-    max_frames=8 \
-    model_config.batch_size=32
+  reward_model=rbm \
+  model_path=robometer/Robometer-4B \
+  custom_eval.eval_types=[confusion_matrix] \
+  custom_eval.confusion_matrix=[[aliangdw_usc_franka_policy_ranking_usc_franka_policy_ranking,jesbu1_utd_so101_clean_policy_ranking_top_utd_so101_clean_policy_ranking_top]] \
+  max_frames=8 \
+  model_config.batch_size=32
 ```
 
-Details: [robometer/evals/README.md](robometer/evals/README.md).
-
-### Baseline evaluation (all models)
-
-- **RBM:** use the [reward alignment](#robometer-evaluation), [policy ranking](#robometer-evaluation), or [confusion matrix](#robometer-evaluation) commands above; set `model_path` to your checkpoint.
-- **ReWIND, Robo-Dopamine, VLAC, RoboReward:** see [robometer/evals/README.md](robometer/evals/README.md) and `eval_commands/reward_alignment.sh`, `eval_commands/policy_ranking.sh`, `eval_commands/confusion_matrix.sh`. For Robo-Dopamine use `.venv-robodopamine/bin/python` (vLLM) instead of `uv run`.
+For baseline models (ReWIND, Robo-Dopamine, VLAC, RoboReward) see `eval_commands/*.sh`.
 
 ---
 
 ## 📊 Dataset generation
 
-Supported: **AgiBotWorld** (streaming), **LIBERO** (HDF5), and custom configs.
-
 ```bash
 # AgiBotWorld
-uv run python dataset_upload/generate_hf_dataset.py --config_path=dataset_upload/configs/data_gen_configs/agibot_world.yaml
+uv run python dataset_upload/generate_hf_dataset.py \
+  --config_path=dataset_upload/configs/data_gen_configs/agibot_world.yaml
 
 # LIBERO
-uv run python dataset_upload/generate_hf_dataset.py --config_path=dataset_upload/configs/data_gen.yaml \
-  --dataset.dataset_path=LIBERO/libero/datasets/libero_90 --dataset.dataset_name=libero_90
+uv run python dataset_upload/generate_hf_dataset.py \
+  --config_path=dataset_upload/configs/data_gen.yaml \
+  --dataset.dataset_path=LIBERO/libero/datasets/libero_90 \
+  --dataset.dataset_name=libero_90
 ```
 
-See dataset_upload README and dataset_guides for adding datasets.
+See `dataset_upload/README.md` and `dataset_upload/dataset_guides/` for adding new datasets.
 
 ---
 
 ## 📥 Download raw datasets (optional)
 
-If you prefer not to use the processed datasets:
-
 ```bash
 export ROBOMETER_DATASET_PATH=/path/to/your/robometer_dataset
-./scripts/download_data.sh
+./scripts/data/download_data.sh
 
 # Preprocess
-uv run python -m robometer.data.scripts.preprocess_datasets --config robometer/configs/preprocess.yaml
+uv run python -m robometer.data.scripts.preprocess_datasets \
+  --config robometer/configs/preprocess.yaml
 export ROBOMETER_PROCESSED_DATASETS_PATH=/path/to/save/processed_datasets
 ```
 
@@ -270,11 +449,12 @@ export ROBOMETER_PROCESSED_DATASETS_PATH=/path/to/save/processed_datasets
 This project is licensed under the [MIT License](LICENSE).
 
 ## BibTeX
-```
+
+```bibtex
 @inproceedings{liang2026robometer,
   title     = {Robometer: Scaling General-Purpose Robotic Reward Models via Trajectory Comparisons},
-  author={Anthony Liang and Yigit Korkmaz and Jiahui Zhang and Minyoung Hwang and Abrar Anwar and Sidhant Kaushik and Aditya Shah and Alex S. Huang and Luke Zettlemoyer and Dieter Fox and Yu Xiang and Anqi Li and Andreea Bobu and Abhishek Gupta and Stephen Tu and Erdem Biyik and Jesse Zhang},
-  year={2026},
-  booktitle={Robotics: Science and Systems 2026},
+  author    = {Anthony Liang and Yigit Korkmaz and Jiahui Zhang and Minyoung Hwang and Abrar Anwar and Sidhant Kaushik and Aditya Shah and Alex S. Huang and Luke Zettlemoyer and Dieter Fox and Yu Xiang and Anqi Li and Andreea Bobu and Abhishek Gupta and Stephen Tu and Erdem Biyik and Jesse Zhang},
+  year      = {2026},
+  booktitle = {Robotics: Science and Systems 2026},
 }
 ```

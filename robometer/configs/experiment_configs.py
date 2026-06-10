@@ -366,7 +366,7 @@ class TrainingConfig:
     """Config for training settings"""
 
     # Hardware settings
-    num_gpus: int = field(default=2, metadata={"help": "Number of GPUs to use for training"})
+    num_gpus: int = field(default=8, metadata={"help": "Number of GPUs to use for training"})
 
     # Output and logging
     output_dir: str = field(default="./logs")
@@ -383,7 +383,7 @@ class TrainingConfig:
     )
 
     # Training arguments
-    per_device_train_batch_size: int = field(default=1)
+    per_device_train_batch_size: int = field(default=4)
     gradient_accumulation_steps: int = field(default=16)
     learning_rate: float = field(default=5e-7)
     num_train_epochs: Optional[int] = field(default=1)  # Default to 1 epoch if not specified

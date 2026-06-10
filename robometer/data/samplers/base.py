@@ -82,8 +82,8 @@ class RBMBaseSampler:
         self.task_indices = combined_indices["task_indices"]
         self.source_indices = combined_indices["source_indices"]
         self.partial_success_indices = combined_indices["partial_success_indices"]
-        self.paired_human_robot_by_task = combined_indices["paired_human_robot_by_task"]
-        self.tasks_with_multiple_quality_labels = combined_indices["tasks_with_multiple_quality_labels"]
+        self.paired_human_robot_by_task = combined_indices.get("paired_human_robot_by_task", {})
+        self.tasks_with_multiple_quality_labels = combined_indices.get("tasks_with_multiple_quality_labels", list(set(combined_indices["optimal_by_task"].keys()) & set(combined_indices["suboptimal_by_task"].keys())))
 
         # Build mapping from data source -> available task instructions
         self._build_tasks_by_data_source()

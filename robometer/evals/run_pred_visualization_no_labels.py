@@ -54,7 +54,8 @@ from robometer.utils.logger import get_logger
 
 logger = get_logger()
 
-DEFAULT_EVAL_DATASET = "local_real_eval"
+DEFAULT_EVAL_DATASET = "local_eval_real_success"
+# DEFAULT_EVAL_DATASET = "local_real_eval"
 DEFAULT_BASELINE_MODEL_PATH = "/home/yingxi/RoboFAC/robometer/robometer/Robometer-4B"
 MODEL_SCOPES = ("baseline", "oracle")
 MODEL_COLORS = {

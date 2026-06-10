@@ -49,10 +49,11 @@ from robometer.utils.logger import get_logger
 
 logger = get_logger()
 
-DEFAULT_EVAL_DATASET = "local_PegInsertionVertical_eval"
+# DEFAULT_EVAL_DATASET = "local_PegInsertionVertical_eval"
+DEFAULT_EVAL_DATASET = "local_real_eval"
 DEFAULT_REPORT_FILENAME = "peg_insertion_vertical_eval_report.json"
 COMPARISON_REPORT_FILENAME = "peg_insertion_vertical_comparison_report.json"
-DEFAULT_BASELINE_MODEL_PATH = "robometer/Robometer-4B"
+DEFAULT_BASELINE_MODEL_PATH = "/home/yingxi/RoboFAC/robometer/robometer/Robometer-4B"
 MODEL_SCOPES = ("baseline", "oracle")
 QUALITY_ALIASES: Dict[str, Set[str]] = {
     "success": {"successful", "successful_labeled", "optimal"},
