@@ -32,6 +32,8 @@ robometer/
 ├── evals/                  # Local eval & visualization scripts
 │   ├── run_pred_visualization_no_labels.py          # Single-checkpoint visualization (no GT)
 │   ├── run_baseline_eval_local_peg_insertion_vertical.py
+│   ├── run_last_frame_mae_eval.py                   # Last-frame MAE (full + truncated settings)
+│   ├── recompute_metrics.py                         # Re-derive metrics from saved results.json
 │   ├── combine_checkpoint_eval_plots.py             # Multi-checkpoint combined plots (no GT)
 │   └── combine_checkpoint_metric_plots.py           # Multi-checkpoint plots + metric summary
 ├── scripts/
@@ -43,7 +45,8 @@ robometer/
 │   ├── policy_ranking.sh
 │   ├── confusion_matrix.sh
 │   ├── sweep_rbm_checkpoints_no_labels.sh           # Sweep all rbm/ checkpoints (no GT)
-│   └── sweep_rbm_checkpoints_with_metrics.sh        # Sweep all rbm/ checkpoints + metrics
+│   ├── sweep_rbm_checkpoints_with_metrics.sh        # Sweep all rbm/ checkpoints + Pearson/Loss (3 quality groups)
+│   └── sweep_rbm_checkpoints_last_frame_mae.sh      # Sweep all rbm/ checkpoints + last-frame MAE (3 quality groups)
 ├── train.py                # Training entrypoint
 └── pyproject.toml          # Dependencies (uv)
 ```
@@ -181,7 +184,7 @@ Evaluate **every** checkpoint under `logs/rbm/` in one shot and produce combined
 per-trajectory plots overlaying all checkpoints against the Robometer-4B baseline.
 Results are written to `/data/yingxi/robometer/all_checkpoint_eval_output*/`.
 
-**Option A — No GT labels (visualization only)**
+**Option A — No GT labels (real-world data, visualization only)**
 
 Runs `run_pred_visualization_no_labels.py` per checkpoint; combines predicted-progress
 curves (Blues palette, light→dark) + Robometer-4B baseline (orange) into one PNG per
@@ -203,28 +206,74 @@ Output: `all_checkpoint_eval_output/combined_trajectory_plots/<trajectory_id>.pn
 
 ---
 
-**Option B — With GT labels (Pearson / Loss metrics)**
+**Option B — With GT labels (Simulation data, Pearson / Loss, all 3 quality groups)**
 
-Runs `run_baseline_eval.py` per checkpoint (requires `target_progress` in dataset);
-additionally produces a `metric_vs_training_step.png` summary figure with one subplot
-per metric and the Robometer-4B baseline value as a horizontal dashed reference line.
+Runs `run_baseline_eval.py` once per checkpoint evaluating **all three data-quality
+groups** (successful / failure / suboptimal) in a single pass. Produces **three metric
+figures** — one per quality group — each showing Pearson and Loss vs. training step
+with the Robometer-4B baseline as a horizontal dashed reference line.
 
 ```bash
 cd ~/RoboFAC/robometer
 bash eval_commands/sweep_rbm_checkpoints_with_metrics.sh 2>&1 | tee eval_sweep_metrics.log
 ```
 
-To re-run only the plotting step:
+To re-run only the metric derivation + plotting step:
 ```bash
 cd ~/RoboFAC/robometer
+BASE=baseline_eval_output/all_checkpoint_reward_alignment
+uv run python evals/recompute_metrics.py --output-base "$BASE"
 uv run python evals/combine_checkpoint_metric_plots.py \
-  --output-base /data/yingxi/robometer/all_checkpoint_eval_output_metrics \
-  --baseline-dir /data/yingxi/robometer/all_checkpoint_eval_output_metrics/baseline_Robometer-4B
+  --output-base "$BASE" \
+  --baseline-dir "$BASE/baseline_Robometer-4B"
 ```
 
-Output:
-- `all_checkpoint_eval_output_metrics/combined_trajectory_plots/<trajectory_id>.png`
-- `all_checkpoint_eval_output_metrics/metric_vs_training_step.png`
+Output (under `baseline_eval_output/all_checkpoint_reward_alignment/`):
+- `combined_trajectory_plots/<trajectory_id>.png` — per-trajectory progress curves
+- `metric_vs_step_successful_labeled.png` — Pearson & Loss for successful trajectories
+- `metric_vs_step_failure_labeled.png`    — Pearson & Loss for failure trajectories
+- `metric_vs_step_suboptimal_labeled.png` — Pearson & Loss for suboptimal trajectories
+
+---
+
+**Option C — 末帧 MAE (Simulation data, Last-frame accuracy, all 3 quality groups)**
+
+Computes **last-frame MAE** under two conditions across all three quality groups and
+produces **three metric figures** (one per quality group):
+
+| Setting | Input | Prediction | GT |
+|---|---|---|---|
+| **Full video** | Complete trajectory (N frames) | `pred[-1]` | `target_progress[-1]` |
+| **Truncated** (×5 seeds) | Random prefix of length k ∈ [N/4, N/2] | `pred[-1]` | `target_progress[k-1]` |
+
+```bash
+cd ~/RoboFAC/robometer
+bash eval_commands/sweep_rbm_checkpoints_last_frame_mae.sh 2>&1 | tee eval_last_frame_mae.log
+```
+
+To re-run only the plotting step (results already on disk):
+```bash
+cd ~/RoboFAC/robometer
+BASE=baseline_eval_output/all_checkpoint_last_frame_mae
+uv run python evals/combine_checkpoint_metric_plots.py \
+  --output-base "$BASE" \
+  --baseline-dir "$BASE/baseline_Robometer-4B"
+```
+
+To evaluate a single checkpoint (smoke-test):
+```bash
+cd ~/RoboFAC/robometer
+uv run python evals/run_last_frame_mae_eval.py \
+  --model-path /data/yingxi/robometer/logs/rbm/checkpoint-400/ \
+  --quality-labels successful_labeled failure_labeled suboptimal_labeled \
+  --output-dir /tmp/lfmae_test --max-trajectories 3
+```
+
+Output (under `baseline_eval_output/all_checkpoint_last_frame_mae/`):
+- `<ckpt>/last_frame_mae/results.json` — per-trajectory details
+- `metric_vs_step_successful_labeled.png` — MAE full & truncated for successful
+- `metric_vs_step_failure_labeled.png`    — MAE full & truncated for failure
+- `metric_vs_step_suboptimal_labeled.png` — MAE full & truncated for suboptimal
 
 ---
 

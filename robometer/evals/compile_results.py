@@ -441,7 +441,7 @@ def run_reward_alignment_eval_per_trajectory(
             gt_bins_mae.append(gt_bin)
 
         # Only compute metrics for successful trajectories
-        if quality_label == "successful":
+        if quality_label in ("successful", "successful_labeled"):
             # Compute loss based on mode
             if is_discrete_mode and traj_pred_logits is not None and traj_target_bins is not None:
                 # Discrete mode: compute cross-entropy loss between logits and target bins
@@ -492,7 +492,7 @@ def run_reward_alignment_eval_per_trajectory(
             plots.append(fig)
 
         # Accumulate metrics only for successful trajectories
-        if quality_label == "successful":
+        if quality_label in ("successful", "successful_labeled"):
             loss_trajectories.append(traj_loss)
             if not np.isnan(traj_pearson):
                 pearson_trajectories.append(traj_pearson)

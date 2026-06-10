@@ -28,7 +28,7 @@ class CustomEvalDataset(BaseDataset):
         filter_quality_labels: Optional[List[str]] = None
 
         if sampler_type == "reward_alignment":
-            filter_quality_labels = ["successful"]
+            filter_quality_labels = None  # evaluate all quality groups; per-quality metrics computed by recompute_metrics.py
         elif sampler_type == "confusion_matrix":
             filter_quality_labels = ["successful", "suboptimal"]
 

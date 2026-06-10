@@ -8,15 +8,18 @@ Combine per-checkpoint reward-alignment evaluation results into:
                      (Blues palette, light→dark) + Robometer-4B baseline
                      (orange) + ground-truth (grey dashed)
 
-  2. A single summary figure  metric_vs_training_step.png  with one
-     subplot per metric (pearson, loss, …) plotting metric value vs.
-     checkpoint training step, with the Robometer-4B baseline as a
-     horizontal dashed reference line.
+  2. Three metric summary figures — one per data-quality group:
+       metric_vs_step_successful_labeled.png
+       metric_vs_step_failure_labeled.png
+       metric_vs_step_suboptimal_labeled.png
+     Each figure contains one subplot per metric (pearson, loss, …)
+     showing metric value vs. training step with the Robometer-4B
+     baseline as a horizontal dashed reference line.
 
 Usage:
     python combine_checkpoint_metric_plots.py \\
-        --output-base /data/yingxi/robometer/all_checkpoint_eval_output_metrics \\
-        --baseline-dir  /data/yingxi/robometer/all_checkpoint_eval_output_metrics/baseline_Robometer-4B
+        --output-base ~/RoboFAC/robometer/baseline_eval_output/all_checkpoint_reward_alignment \\
+        --baseline-dir ~/RoboFAC/robometer/baseline_eval_output/all_checkpoint_reward_alignment/baseline_Robometer-4B
 """
 
 import argparse
@@ -69,7 +72,7 @@ def _ckpt_step(name: str) -> int:
 
 
 def _ckpt_colors(n: int) -> list:
-    cmap = cm.get_cmap("Blues")
+    cmap = mpl.colormaps["Blues"]
     if n == 1:
         return [cmap((_CKPT_LO + _CKPT_HI) / 2)]
     return [cmap(_CKPT_LO + (_CKPT_HI - _CKPT_LO) * i / (n - 1)) for i in range(n)]
@@ -89,6 +92,7 @@ def _find_results_json(run_dir: str) -> Optional[str]:
 
 
 def _find_metrics_json(run_dir: str) -> Optional[str]:
+    """Return the first metrics file found (legacy single-file path)."""
     candidates = [
         os.path.join(run_dir, "all_metrics.json"),
         os.path.join(run_dir, "reward_alignment", "metrics.json"),
@@ -97,6 +101,77 @@ def _find_metrics_json(run_dir: str) -> Optional[str]:
         if os.path.exists(c):
             return c
     return None
+
+
+def _collect_all_metrics(run_dir: str) -> Dict[str, float]:
+    """
+    Merge metrics from all known sub-eval files into one flat dict.
+
+    Key preservation rules:
+    - all_metrics.json      : nested {eval_type: {raw_key: val}} → keep raw_key as-is
+                              (raw_key may be "{quality}/{metric}" or "{dataset}/{metric}")
+    - reward_alignment/metrics.json / last_frame_mae/metrics.json : flat {raw_key: val}
+    Keys that look like "{long_dataset_name}/{metric}" (dataset name has >2 segments or
+    contains "eval") are shortened to just "{metric}" for the plot dimension lookup.
+    Keys that look like "{quality_label}/{metric}" (quality label is a known short word)
+    are kept verbatim so the plotter can group by quality.
+    """
+    import math as _m
+
+    KNOWN_QUALITY_PREFIXES = {
+        "successful_labeled", "successful",
+        "failure_labeled", "failure",
+        "suboptimal_labeled", "suboptimal",
+        "overall",
+    }
+
+    def _normalise(key: str, val: Any) -> Optional[tuple]:
+        """Return (normalised_key, float_val) or None if not numeric."""
+        if not isinstance(val, (int, float)):
+            return None
+        fval = float(val)
+        if _m.isnan(fval):
+            return None
+        if "/" not in key:
+            return key, fval
+        prefix, metric = key.rsplit("/", 1)
+        # Keep quality-prefix keys verbatim; strip dataset-name prefixes
+        if prefix in KNOWN_QUALITY_PREFIXES:
+            return key, fval          # e.g. "successful_labeled/pearson"
+        return metric, fval           # e.g. "local_PegInsertionVertical_eval/pearson" → "pearson"
+
+    out: Dict[str, float] = {}
+
+    # 1. all_metrics.json  (nested: {eval_type: {raw_key: val}})
+    all_path = os.path.join(run_dir, "all_metrics.json")
+    if os.path.exists(all_path):
+        try:
+            raw = _load_json(all_path)
+            if isinstance(raw, dict):
+                for top_v in raw.values():
+                    if isinstance(top_v, dict):
+                        for k, v in top_v.items():
+                            r = _normalise(k, v)
+                            if r:
+                                out[r[0]] = r[1]
+        except Exception as e:
+            print(f"  [warn] {all_path}: {e}", file=sys.stderr)
+
+    # 2. Flat metrics files
+    for sub in ("reward_alignment/metrics.json", "last_frame_mae/metrics.json"):
+        fpath = os.path.join(run_dir, sub)
+        if os.path.exists(fpath):
+            try:
+                raw = _load_json(fpath)
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        r = _normalise(k, v)
+                        if r:
+                            out[r[0]] = r[1]
+            except Exception as e:
+                print(f"  [warn] {fpath}: {e}", file=sys.stderr)
+
+    return out
 
 
 def _group_by_traj(results: List[Dict]) -> Dict[str, List[Dict]]:
@@ -276,110 +351,397 @@ def _plot_trajectory(
 
 # ── metric summary plot ───────────────────────────────────────────────────────
 
+# Display names for the metric part of a "{quality}/{metric}" or "{metric}" key
 METRIC_LABELS = {
-    "pearson": "Pearson Correlation  ↑",
-    "loss":    "Trajectory Loss  ↓",
+    "pearson":                  "Pearson Correlation  ↑",
+    "loss":                     "Trajectory Loss (MSE)  ↓",
+    "last_frame_mae_full":      "Last-frame MAE · Full video  ↓",
+    "last_frame_mae_truncated": "Last-frame MAE · Truncated (×5 seeds)  ↓",
+    "n_trajectories":           None,   # skip in plots
 }
 METRIC_YLIMS = {
-    "pearson": (0, 1),
-    "loss":    None,          # auto
+    "pearson":                  (0.0, 1.05),  # extra headroom so title never overlaps
+    "loss":                     (0.0, None),
+    "last_frame_mae_full":      (0.0, 1.0),
+    "last_frame_mae_truncated": (0.0, 1.0),
 }
+# Colors per quality label; unknown labels get auto-assigned
+QUALITY_PALETTE = {
+    "successful_labeled":  "#2a6ebb",
+    "successful":          "#2a6ebb",
+    "suboptimal_labeled":  "#e6a817",
+    "suboptimal":          "#e6a817",
+    "failure_labeled":     "#cc3333",
+    "failure":             "#cc3333",
+    "overall":             "#555555",
+}
+QUALITY_LINE_STYLES = {
+    "successful_labeled":  "-",
+    "successful":          "-",
+    "suboptimal_labeled":  "--",
+    "suboptimal":          "--",
+    "failure_labeled":     "-.",
+    "failure":             "-.",
+    "overall":             ":",
+}
+# Preferred plot order for metrics (others appended alphabetically)
+_METRIC_ORDER = ["pearson", "loss", "last_frame_mae_full", "last_frame_mae_truncated"]
+# Preferred quality ordering in legend
+_QUALITY_ORDER = ["successful_labeled", "successful",
+                  "suboptimal_labeled", "suboptimal",
+                  "failure_labeled", "failure", "overall"]
 
 
-def _plot_metric_summary(
-    out_path: str,
-    ckpt_metrics: List[Tuple[int, Dict[str, float]]],   # [(step, metrics), …]  sorted
+def _parse_metric_key(key: str) -> Tuple[str, str]:
+    """Split "{quality}/{metric}" → (quality, metric). No slash → ("overall", key)."""
+    if "/" in key:
+        quality, metric = key.rsplit("/", 1)
+        return quality, metric
+    return "overall", key
+
+
+def _build_quality_color(qualities: List[str]) -> Dict[str, str]:
+    """Return color per quality, falling back to a tab10 palette for unknowns."""
+    import matplotlib.cm as cm
+    colors = dict(QUALITY_PALETTE)
+    unknown = [q for q in qualities if q not in colors]
+    tab = mpl.colormaps["tab10"]
+    for i, q in enumerate(unknown):
+        colors[q] = tab((i + 6) % 10)     # offset to avoid clash with our palette
+    return colors
+
+
+def _subplot_one_metric(
+    ax,
+    metric_name: str,
+    quality: str,
+    quality_color: Any,
+    ckpt_metrics: List[Tuple[int, Dict[str, float]]],
     baseline_metrics: Dict[str, float],
-) -> None:
-    """Metric value vs. training step — one subplot per metric key."""
-    all_keys = sorted(
-        {k for _, m in ckpt_metrics for k in m}
-        | set(baseline_metrics.keys())
-    )
-    # Only plot numeric metrics we recognise
-    plot_keys = [k for k in ("pearson", "loss") if k in all_keys]
-    extra = [k for k in all_keys if k not in ("pearson", "loss")
-             and not k.startswith("_")]
-    plot_keys += extra
+    steps: List[int],
+    dot_colors: list,
+) -> bool:
+    """Draw one metric subplot for one quality group. Returns True if data was found."""
+    import math as _math
 
-    if not plot_keys:
-        print("  [warn] No numeric metrics to plot.", file=sys.stderr)
-        return
+    raw_key = f"{quality}/{metric_name}"
+    vals = [m.get(raw_key) for _, m in ckpt_metrics]
+    valid_pts = [(s, v) for s, v in zip(steps, vals)
+                 if v is not None and not _math.isnan(v)]
 
-    n_metrics  = len(plot_keys)
-    fig_h      = 3.6 * n_metrics
-    fig, axes  = plt.subplots(n_metrics, 1, figsize=(9, fig_h),
-                               gridspec_kw=dict(hspace=0.55))
-    if n_metrics == 1:
-        axes = [axes]
+    if not valid_pts:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                transform=ax.transAxes, color="#aaaaaa", fontsize=11)
+        return False
 
-    steps  = [s for s, _ in ckpt_metrics]
-    colors = _ckpt_colors(max(len(steps), 2))   # reuse same palette for dots
+    xs, ys = zip(*valid_pts)
+    ls = QUALITY_LINE_STYLES.get(quality, "-")
 
-    for ax, key in zip(axes, plot_keys):
-        vals = [m.get(key, float("nan")) for _, m in ckpt_metrics]
-        b_val = baseline_metrics.get(key)
+    ax.plot(xs, ys, linestyle=ls, linewidth=2.2, color=quality_color,
+            alpha=0.92, zorder=5)
+    for xi, yi, dc in zip(xs, ys, [dot_colors[steps.index(xi)] for xi in xs]):
+        ax.scatter(xi, yi, s=60, color=dc, edgecolors=quality_color,
+                   linewidth=1.0, zorder=6)
+    for xi, yi in zip(xs, ys):
+        ax.annotate(f"{yi:.3f}", (xi, yi),
+                    xytext=(0, 10), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=7.5, color=quality_color)
 
-        # ── checkpoint curve ──
-        valid = [(s, v) for s, v in zip(steps, vals) if not np.isnan(v)]
-        if valid:
-            xs, ys = zip(*valid)
-            ax.plot(xs, ys, linestyle="-", linewidth=2.0,
-                    color="#2a6ebb", zorder=5, alpha=0.9)
-            for xi, yi, ci in zip(xs, ys, [colors[steps.index(x)] for x in xs]):
-                ax.scatter(xi, yi, s=55, color=ci, edgecolors="#1a4e8a",
-                           linewidth=0.8, zorder=6)
-            # annotate each point
-            for xi, yi in zip(xs, ys):
-                ax.annotate(
-                    f"{yi:.3f}", (xi, yi),
-                    textcoords="offset points", xytext=(0, 8),
-                    ha="center", fontsize=7, color="#2a6ebb",
-                )
+    # Baseline dashed line — orange, annotated on right margin
+    b_val = baseline_metrics.get(raw_key)
+    if b_val is None or (isinstance(b_val, float) and _math.isnan(b_val)):
+        b_val = baseline_metrics.get(metric_name)  # fallback to overall
 
-        # ── baseline dashed line ──
-        if b_val is not None and not np.isnan(b_val):
-            x_lo = min(steps) * 0.85 if steps else 0
-            x_hi = max(steps) * 1.10 if steps else 1
-            ax.axhline(b_val, linestyle="--", linewidth=1.8,
-                       color=BASELINE_COLOR, alpha=0.90, zorder=4)
-            ax.annotate(
-                f"Robometer-4B  {b_val:.3f}",
-                xy=(x_lo + (x_hi - x_lo) * 0.02, b_val),
-                xytext=(0, 5), textcoords="offset points",
-                fontsize=8, color=BASELINE_COLOR, fontweight="bold",
-            )
+    if b_val is not None and not (isinstance(b_val, float) and _math.isnan(b_val)):
+        ax.axhline(b_val, linestyle="--", linewidth=1.8,
+                   color=BASELINE_COLOR, alpha=0.88, zorder=4)
+        ax.annotate(
+            f"{b_val:.3f}",
+            xy=(1.0, b_val), xycoords=("axes fraction", "data"),
+            xytext=(6, 0), textcoords="offset points",
+            fontsize=8, color=BASELINE_COLOR, fontweight="bold",
+            va="center", ha="left", annotation_clip=False,
+        )
 
-        # ── axis decoration ──
-        label = METRIC_LABELS.get(key, key)
-        ax.set_ylabel(label)
-        ax.set_xlabel("training step")
-        ax.set_title(label, fontsize=10, fontweight="bold", pad=8)
-        if steps:
-            ax.set_xticks(steps)
-            ax.set_xticklabels([f"{s:,}" for s in steps])
-        ylim = METRIC_YLIMS.get(key)
-        if ylim:
-            ax.set_ylim(*ylim)
+    metric_label = METRIC_LABELS.get(metric_name, metric_name.replace("_", " "))
+    ax.set_ylabel(metric_label, fontsize=9, labelpad=6)
+    ax.set_xlabel("Training step", fontsize=9)
 
-        # light vertical gridlines at each step
-        ax.xaxis.grid(True, which="major", alpha=0.35, linestyle=":")
-        ax.yaxis.grid(True, which="major", alpha=0.25)
+    if steps:
+        ax.set_xticks(steps)
+        ax.set_xticklabels([f"{s:,}" for s in steps], rotation=30, ha="right")
 
-        # custom legend entry for baseline
-        from matplotlib.lines import Line2D
-        legend_handles = [
-            Line2D([0], [0], color="#2a6ebb", linewidth=2, label="fine-tuned ckpt"),
-            Line2D([0], [0], color=BASELINE_COLOR, linewidth=1.8,
+    ylim = METRIC_YLIMS.get(metric_name)
+    if ylim:
+        lo, hi = ylim
+        cur_lo, cur_hi = ax.get_ylim()
+        ax.set_ylim(lo if lo is not None else cur_lo,
+                    hi if hi is not None else cur_hi)
+
+    ax.xaxis.grid(True, alpha=0.28, linestyle=":")
+    ax.yaxis.grid(True, alpha=0.20)
+    return True
+
+
+def _plot_one_quality(
+    out_path: str,
+    quality: str,
+    unique_metrics: List[str],
+    quality_color: Any,
+    ckpt_metrics: List[Tuple[int, Dict[str, float]]],
+    baseline_metrics: Dict[str, float],
+) -> bool:
+    """One polished figure for one quality group — subplots for every metric."""
+    import math as _math
+    from matplotlib.lines import Line2D
+
+    steps = [s for s, _ in ckpt_metrics]
+    dot_colors = _ckpt_colors(max(len(steps), 2))
+    n = len(unique_metrics)
+
+    # Adaptive grid: ≤2 metrics → 1 row; 3-4 metrics → 2×2
+    if n <= 2:
+        nrows, ncols = 1, n
+    else:
+        ncols = 2
+        nrows = (n + 1) // 2
+
+    fig_w = max(7.0 * ncols, 10.0)
+    fig_h = 5.2 * nrows
+    fig, axes_arr = plt.subplots(nrows, ncols,
+                                 figsize=(fig_w, fig_h),
+                                 gridspec_kw=dict(hspace=0.55, wspace=0.38))
+    axes_flat = np.array(axes_arr).flatten().tolist()
+
+    has_any = False
+    for ax, metric_name in zip(axes_flat, unique_metrics):
+        has_any |= _subplot_one_metric(
+            ax=ax, metric_name=metric_name,
+            quality=quality, quality_color=quality_color,
+            ckpt_metrics=ckpt_metrics, baseline_metrics=baseline_metrics,
+            steps=steps, dot_colors=dot_colors,
+        )
+
+    # Hide unused axes in the grid
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    if not has_any:
+        plt.close(fig)
+        return False
+
+    # Shared legend at the bottom of the figure
+    q_label = quality.replace("_labeled", "").replace("_", " ").title()
+    legend_handles = [
+        plt.Line2D([0], [0], color=quality_color, linewidth=2.2,
+                   linestyle=QUALITY_LINE_STYLES.get(quality, "-"),
+                   label=f"Fine-tuned ({q_label})"),
+        plt.Line2D([0], [0], color=BASELINE_COLOR, linewidth=1.8,
                    linestyle="--", label="Robometer-4B baseline"),
-        ]
-        ax.legend(handles=legend_handles, loc="best")
+    ]
+    fig.legend(handles=legend_handles, loc="lower center",
+               ncol=2, fontsize=9, framealpha=0.90,
+               bbox_to_anchor=(0.5, -0.03))
 
-    fig.suptitle("Metric vs. Training Step", fontsize=13, fontweight="bold", y=1.01)
+    fig.suptitle(f"{q_label}  —  Metric vs. Training Step",
+                 fontsize=14, fontweight="bold", y=1.01)
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  [summary] {out_path}")
+    return True
+
+
+def _plot_one_metric(
+    out_path: str,
+    metric_name: str,
+    unique_qualities: List[str],
+    quality_colors: Dict[str, Any],
+    ckpt_metrics: List[Tuple[int, Dict[str, float]]],
+    baseline_metrics: Dict[str, float],
+) -> None:
+    """(kept for backward-compat; not called by default any more)"""
+    """One polished figure for a single metric — all quality groups on the same axes."""
+    import math as _math
+
+    metric_label = METRIC_LABELS.get(metric_name, metric_name.replace("_", " "))
+    steps = [s for s, _ in ckpt_metrics]
+    dot_colors = _ckpt_colors(max(len(steps), 2))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    has_any_data = False
+
+    for quality in unique_qualities:
+        raw_key = f"{quality}/{metric_name}"
+        vals = [m.get(raw_key) for _, m in ckpt_metrics]
+        valid_pts = [
+            (s, v) for s, v in zip(steps, vals)
+            if v is not None and not _math.isnan(v)
+        ]
+        if not valid_pts:
+            continue
+
+        has_any_data = True
+        xs, ys = zip(*valid_pts)
+        color = quality_colors.get(quality, "#555555")
+        ls    = QUALITY_LINE_STYLES.get(quality, "-")
+        q_label = quality.replace("_labeled", "").replace("_", " ")
+
+        ax.plot(xs, ys, linestyle=ls, linewidth=2.2, color=color,
+                alpha=0.92, zorder=5, label=q_label)
+        for xi, yi, dc in zip(xs, ys, [dot_colors[steps.index(xi)] for xi in xs]):
+            ax.scatter(xi, yi, s=60, color=dc, edgecolors=color,
+                       linewidth=1.0, zorder=6)
+        for xi, yi in zip(xs, ys):
+            ax.annotate(
+                f"{yi:.3f}", (xi, yi),
+                xytext=(0, 10), textcoords="offset points",
+                ha="center", va="bottom", fontsize=7.5, color=color,
+                fontweight="medium",
+            )
+
+    # Baseline — per quality (or fallback to overall)
+    plotted_b_qualities = set()
+    for quality in unique_qualities:
+        b_key = f"{quality}/{metric_name}"
+        b_val = baseline_metrics.get(b_key)
+        if b_val is None or (isinstance(b_val, float) and _math.isnan(b_val)):
+            continue
+        color = quality_colors.get(quality, "#555555")
+        q_label = quality.replace("_labeled", "").replace("_", " ")
+        ax.axhline(b_val, linestyle="--", linewidth=1.6,
+                   color=color, alpha=0.55, zorder=3)
+        ax.annotate(
+            f"baseline ({q_label}): {b_val:.3f}",
+            xy=(1.0, b_val), xycoords=("axes fraction", "data"),
+            xytext=(7, 0), textcoords="offset points",
+            fontsize=7.5, color=color, alpha=0.85,
+            va="center", ha="left", annotation_clip=False,
+        )
+        plotted_b_qualities.add(quality)
+
+    # Fallback overall baseline when no per-quality baseline exists
+    if not plotted_b_qualities:
+        b_val = baseline_metrics.get(metric_name)
+        if b_val is not None and not (isinstance(b_val, float) and _math.isnan(b_val)):
+            ax.axhline(b_val, linestyle="--", linewidth=1.8,
+                       color=BASELINE_COLOR, alpha=0.88, zorder=3,
+                       label=f"Robometer-4B ({b_val:.3f})")
+            ax.annotate(
+                f"baseline: {b_val:.3f}",
+                xy=(1.0, b_val), xycoords=("axes fraction", "data"),
+                xytext=(7, 0), textcoords="offset points",
+                fontsize=8, color=BASELINE_COLOR, fontweight="bold",
+                va="center", ha="left", annotation_clip=False,
+            )
+
+    if not has_any_data:
+        plt.close(fig)
+        print(f"  [skip]    {metric_name}: no data", file=sys.stderr)
+        return
+
+    # Axis decoration
+    ax.set_xlabel("Training step", fontsize=10)
+    ax.set_ylabel(metric_label, fontsize=10, labelpad=8)
+
+    if steps:
+        ax.set_xticks(steps)
+        ax.set_xticklabels([f"{s:,}" for s in steps])
+
+    ylim = METRIC_YLIMS.get(metric_name)
+    if ylim:
+        lo, hi = ylim
+        cur_lo, cur_hi = ax.get_ylim()
+        ax.set_ylim(
+            lo if lo is not None else cur_lo,
+            hi if hi is not None else cur_hi,
+        )
+
+    ax.xaxis.grid(True, which="major", alpha=0.28, linestyle=":")
+    ax.yaxis.grid(True, which="major", alpha=0.20)
+
+    # Legend inside axes, lower-right (data points are usually in upper region)
+    ax.legend(loc="lower right", fontsize=9, framealpha=0.90,
+              ncol=min(len(unique_qualities), 3))
+
+    fig.suptitle(metric_label, fontsize=13, fontweight="bold", y=1.00)
+    fig.tight_layout()
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=180, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  [summary] {out_path}")
+
+
+def _plot_metric_summary(
+    out_dir: str,
+    ckpt_metrics: List[Tuple[int, Dict[str, float]]],
+    baseline_metrics: Dict[str, float],
+) -> List[str]:
+    """
+    Save ONE PNG per data-quality group into out_dir.
+    Each figure shows all available metrics as side-by-side subplots.
+
+    Output filenames:
+      metric_vs_step_successful_labeled.png
+      metric_vs_step_failure_labeled.png
+      metric_vs_step_suboptimal_labeled.png
+      (plus any other quality labels found in the data)
+
+    Returns list of saved file paths.
+    """
+    # ── collect keys ─────────────────────────────────────────────────────────
+    all_keys: set = set()
+    for _, m in ckpt_metrics:
+        all_keys.update(m.keys())
+    all_keys.update(baseline_metrics.keys())
+
+    parsed: Dict[str, Tuple[str, str]] = {}
+    for key in all_keys:
+        q, mn = _parse_metric_key(key)
+        parsed[key] = (q, mn)
+
+    skip_metrics = {mn for mn, lbl in METRIC_LABELS.items() if lbl is None}
+    unique_metrics = sorted(
+        {mn for _, mn in parsed.values() if mn not in skip_metrics},
+        key=lambda m: (_METRIC_ORDER.index(m) if m in _METRIC_ORDER else 999, m),
+    )
+
+    if not unique_metrics:
+        print("  [warn] No numeric metrics to plot.", file=sys.stderr)
+        return []
+
+    # One figure per quality group
+    unique_qualities = sorted(
+        {q for q, _ in parsed.values() if q != "overall"},
+        key=lambda q: (_QUALITY_ORDER.index(q) if q in _QUALITY_ORDER else 999, q),
+    )
+    quality_colors = _build_quality_color(unique_qualities)
+
+    if not unique_qualities:
+        print("  [warn] No per-quality metrics found (run recompute_metrics.py first).",
+              file=sys.stderr)
+        return []
+
+    saved: List[str] = []
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    for quality in unique_qualities:
+        out_path = os.path.join(out_dir, f"metric_vs_step_{quality}.png")
+        ok = _plot_one_quality(
+            out_path=out_path,
+            quality=quality,
+            unique_metrics=unique_metrics,
+            quality_color=quality_colors[quality],
+            ckpt_metrics=ckpt_metrics,
+            baseline_metrics=baseline_metrics,
+        )
+        if ok:
+            saved.append(out_path)
+
+    return saved
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -428,10 +790,11 @@ def main() -> None:
     else:
         print(f"[warn] No baseline results in {bline_dir}", file=sys.stderr)
 
-    bline_m = _find_metrics_json(bline_dir)
-    if bline_m:
-        baseline_metrics = _extract_scalar_metrics(_load_json(bline_m))
+    baseline_metrics = _collect_all_metrics(bline_dir)
+    if baseline_metrics:
         print(f"Baseline metrics : {baseline_metrics}")
+    else:
+        print(f"[warn] No metrics found in {bline_dir}", file=sys.stderr)
 
     # ── load checkpoint results & metrics ──
     ckpt_data: List[Tuple[str, Dict[str, List[Dict]]]] = []
@@ -447,18 +810,18 @@ def main() -> None:
         else:
             print(f"  [warn] No results for {name}", file=sys.stderr)
 
-        mj = _find_metrics_json(ckpt_dir)
-        if mj:
-            m = _extract_scalar_metrics(_load_json(mj))
+        m = _collect_all_metrics(ckpt_dir)
+        if m:
             ckpt_metrics_list.append((step, m))
             print(f"  {name}  metrics: {m}")
         else:
             print(f"  [warn] No metrics for {name}", file=sys.stderr)
 
-    # ── metric summary plot ──
+    # ── metric summary plots (one PNG per metric) ──
+    saved_plots: List[str] = []
     if ckpt_metrics_list:
-        _plot_metric_summary(
-            out_path=os.path.join(base, "metric_vs_training_step.png"),
+        saved_plots = _plot_metric_summary(
+            out_dir=base,
             ckpt_metrics=ckpt_metrics_list,
             baseline_metrics=baseline_metrics,
         )
@@ -502,7 +865,10 @@ def main() -> None:
 
     print(f"\nAll done.")
     print(f"  Trajectory plots : {traj_dir}/")
-    print(f"  Metric summary   : {base}/metric_vs_training_step.png")
+    if saved_plots:
+        print(f"  Metric plots ({len(saved_plots)}):")
+        for p in saved_plots:
+            print(f"    {os.path.basename(p)}")
 
 
 if __name__ == "__main__":
