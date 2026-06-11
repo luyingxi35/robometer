@@ -45,8 +45,8 @@ robometer/
 │   ├── policy_ranking.sh
 │   ├── confusion_matrix.sh
 │   ├── sweep_rbm_checkpoints_no_labels.sh           # Sweep all rbm/ checkpoints (no GT)
-│   ├── sweep_rbm_checkpoints_with_metrics.sh        # Sweep all rbm/ checkpoints + Pearson/Loss (3 quality groups)
-│   └── sweep_rbm_checkpoints_last_frame_mae.sh      # Sweep all rbm/ checkpoints + last-frame MAE (3 quality groups)
+│   ├── sweep_rbm_checkpoints_with_metrics.sh        # Sweep + Pearson/Loss (3 quality groups); --gpus for parallel
+│   └── sweep_rbm_checkpoints_last_frame_mae.sh      # Sweep + last-frame MAE (3 quality groups); --gpus for parallel
 ├── train.py                # Training entrypoint
 └── pyproject.toml          # Dependencies (uv)
 ```
@@ -215,7 +215,12 @@ with the Robometer-4B baseline as a horizontal dashed reference line.
 
 ```bash
 cd ~/RoboFAC/robometer
+# Single GPU (sequential)
 bash eval_commands/sweep_rbm_checkpoints_with_metrics.sh 2>&1 | tee eval_sweep_metrics.log
+
+# Multi-GPU parallel  (one checkpoint per GPU, ~Nx speedup)
+bash eval_commands/sweep_rbm_checkpoints_with_metrics.sh --gpus 5,6,7 \
+  2>&1 | tee eval_sweep_metrics.log
 ```
 
 To re-run only the metric derivation + plotting step:
@@ -248,7 +253,13 @@ produces **three metric figures** (one per quality group):
 
 ```bash
 cd ~/RoboFAC/robometer
-bash eval_commands/sweep_rbm_checkpoints_last_frame_mae.sh 2>&1 | tee eval_last_frame_mae.log
+# Single GPU (sequential)
+bash eval_commands/sweep_rbm_checkpoints_last_frame_mae.sh \
+  2>&1 | tee eval_last_frame_mae.log
+
+# Multi-GPU parallel  (models within each quality group run concurrently)
+bash eval_commands/sweep_rbm_checkpoints_last_frame_mae.sh --gpus 5,6,7 \
+  2>&1 | tee eval_last_frame_mae.log
 ```
 
 To re-run only the plotting step (results already on disk):
@@ -270,10 +281,12 @@ uv run python evals/run_last_frame_mae_eval.py \
 ```
 
 Output (under `baseline_eval_output/all_checkpoint_last_frame_mae/`):
-- `<ckpt>/last_frame_mae/results.json` — per-trajectory details
-- `metric_vs_step_successful_labeled.png` — MAE full & truncated for successful
-- `metric_vs_step_failure_labeled.png`    — MAE full & truncated for failure
-- `metric_vs_step_suboptimal_labeled.png` — MAE full & truncated for suboptimal
+- `<ckpt>/last_frame_mae/results_{quality}.json` — per-trajectory details, one file per quality group
+- `<ckpt>/last_frame_mae/metrics.json`           — merged metrics for all quality groups
+- `eval_logs/<ckpt>__{quality}.log`              — per-job stdout/stderr for debugging
+- `metric_vs_step_successful_labeled.png`        — MAE full & truncated for successful
+- `metric_vs_step_failure_labeled.png`           — MAE full & truncated for failure
+- `metric_vs_step_suboptimal_labeled.png`        — MAE full & truncated for suboptimal
 
 ---
 

@@ -321,12 +321,17 @@ def save_results(output_dir: str, data: Dict[str, Any]) -> None:
     mae_dir = os.path.join(output_dir, "last_frame_mae")
     Path(mae_dir).mkdir(parents=True, exist_ok=True)
 
-    # Per-trajectory results
+    # Per-trajectory results (one file per quality group to avoid silent overwrites)
     results_out = {
         "setting1_full": data["setting1_full"],
         "setting2_truncated": data["setting2_truncated"],
     }
-    with open(os.path.join(mae_dir, "results.json"), "w") as f:
+    quality_labels_for_fname = data.get("quality_labels", [])
+    if len(quality_labels_for_fname) == 1:
+        results_fname = f"results_{quality_labels_for_fname[0]}.json"
+    else:
+        results_fname = "results.json"
+    with open(os.path.join(mae_dir, results_fname), "w") as f:
         json.dump(_make_json_serializable(results_out), f, indent=2)
 
     # Eval-level metrics (flat, compatible with combine_checkpoint_metric_plots.py)
@@ -338,8 +343,16 @@ def save_results(output_dir: str, data: Dict[str, Any]) -> None:
         metrics_flat = {f"{ql}/{k}": v for k, v in data["metrics"].items()}
     else:
         metrics_flat = data["metrics"]
-    with open(os.path.join(mae_dir, "metrics.json"), "w") as f:
-        json.dump(_make_json_serializable(metrics_flat), f, indent=2)
+    # Merge with existing metrics (preserves keys from earlier quality runs)
+    metrics_path = os.path.join(mae_dir, "metrics.json")
+    try:
+        with open(metrics_path) as f:
+            existing_metrics = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_metrics = {}
+    existing_metrics.update(metrics_flat)
+    with open(metrics_path, "w") as f:
+        json.dump(_make_json_serializable(existing_metrics), f, indent=2)
 
     # Top-level all_metrics.json (merge with existing if present)
     all_metrics_path = os.path.join(output_dir, "all_metrics.json")
@@ -348,13 +361,13 @@ def save_results(output_dir: str, data: Dict[str, Any]) -> None:
             all_metrics = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         all_metrics = {}
-    all_metrics["last_frame_mae"] = metrics_flat
+    all_metrics["last_frame_mae"] = existing_metrics  # fully-merged across all quality runs
     with open(all_metrics_path, "w") as f:
         json.dump(_make_json_serializable(all_metrics), f, indent=2)
 
     print(f"\nSaved results to: {mae_dir}/")
-    print(f"  results.json  ({os.path.getsize(os.path.join(mae_dir,'results.json'))} bytes)")
-    print(f"  metrics.json  → {metrics_flat}")
+    print(f"  {results_fname}  ({os.path.getsize(os.path.join(mae_dir, results_fname))} bytes)")
+    print(f"  metrics.json  → {existing_metrics}")
     print(f"  all_metrics.json updated")
 
 
