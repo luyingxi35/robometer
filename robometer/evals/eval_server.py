@@ -168,6 +168,8 @@ def forward_model(
                 image_grid_thw=batch_inputs.get("image_grid_thw", None),
                 video_grid_thw=batch_inputs.get("video_grid_thw", None),
                 second_per_grid_ts=batch_inputs.get("second_per_grid_ts", None),
+                # mm_token_type_ids added in transformers>=5.x for Qwen3-VL multimodal RoPE
+                mm_token_type_ids=batch_inputs.get("mm_token_type_ids", None),
                 sample_type=sample_type,
                 timing_raw=None,
             )
