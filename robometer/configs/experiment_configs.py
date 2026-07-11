@@ -7,11 +7,10 @@ across different training scripts.
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
-from transformers import PretrainedConfig
 
 
 @dataclass
-class ModelConfig(PretrainedConfig):
+class ModelConfig:
     """Config for model settings"""
 
     base_model_id: str = field(default="Qwen/Qwen2.5-VL-3B-Instruct")
@@ -168,6 +167,32 @@ class DataConfig:
             "and their corresponding target progress labels during training for RBM heads."
         },
     )
+    pair_future_atomic_positive: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, append a same-video positive sample for targeted future atomic hard negatives."
+        },
+    )
+    atomic_prefix_training: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, train RoboTwin atomic progress samples on causal prefixes instead of always using full atomic clips."
+        },
+    )
+    atomic_prefix_ratios: List[float] = field(
+        default_factory=lambda: [0.25, 0.5, 0.7, 0.85, 0.9, 0.95, 1.0],
+        metadata={"help": "Candidate prefix ratios for RoboTwin atomic prefix training."},
+    )
+    atomic_prefix_success_ratio: float = field(
+        default=0.9,
+        metadata={
+            "help": "RoboTwin atomic prefix samples below this ratio are forced to success=0 while retaining progress labels."
+        },
+    )
+    atomic_prefix_min_frames: int = field(
+        default=4,
+        metadata={"help": "Minimum number of frames to keep when sampling RoboTwin atomic prefixes."},
+    )
 
     use_per_frame_progress_token: bool = field(
         default=False,
@@ -188,27 +213,15 @@ class DataConfig:
     preference_strategy_ratio: List[float] = field(default_factory=lambda: [1, 1, 1, 1])
     # [different_task, forward_progress, reverse_progress, rewind]
     progress_strategy_ratio: List[float] = field(default_factory=lambda: [1, 1, 1, 1])
-
-    labeled_progress_data_sources: List[str] = field(
-        default_factory=list,
-        metadata={
-            "help": "Data sources that should use explicit target_progress labels, quality-ranked preference sampling, and quality-driven success labels."
-        },
-    )
+    labeled_progress_data_sources: List[str] = field(default_factory=lambda: ["gen_progress_success", "gen_progress_failure"])
     labeled_quality_order: Dict[str, int] = field(
         default_factory=lambda: {
             "successful_labeled": 2,
             "suboptimal_labeled": 1,
             "failure_labeled": 0,
-        },
-        metadata={
-            "help": "Quality ranking used for labeled-progress datasets when constructing same-task preference pairs."
-        },
+        }
     )
-    labeled_progress_disable_rewind: bool = field(
-        default=True,
-        metadata={"help": "If True, disable rewind-style synthetic sampling for labeled-progress datasets."},
-    )
+    labeled_progress_disable_rewind: bool = field(default=True)
 
     data_source_weights: Optional[Dict[str, float]] = field(
         default=None,
@@ -366,7 +379,7 @@ class TrainingConfig:
     """Config for training settings"""
 
     # Hardware settings
-    num_gpus: int = field(default=8, metadata={"help": "Number of GPUs to use for training"})
+    num_gpus: int = field(default=2, metadata={"help": "Number of GPUs to use for training"})
 
     # Output and logging
     output_dir: str = field(default="./logs")
@@ -383,7 +396,7 @@ class TrainingConfig:
     )
 
     # Training arguments
-    per_device_train_batch_size: int = field(default=4)
+    per_device_train_batch_size: int = field(default=1)
     gradient_accumulation_steps: int = field(default=16)
     learning_rate: float = field(default=5e-7)
     num_train_epochs: Optional[int] = field(default=1)  # Default to 1 epoch if not specified
@@ -397,10 +410,7 @@ class TrainingConfig:
     ddp_bucket_cap_mb: int = field(default=25)
     max_steps: Optional[int] = field(default=-1)  # -1 means no limit, use num_train_epochs instead
     save_steps: int = field(default=100)
-    save_total_limit: Optional[int] = field(
-        default=2,
-        metadata={"help": "Maximum number of Trainer checkpoints to keep. Older step checkpoints are deleted first."},
-    )
+    save_total_limit: Optional[int] = field(default=None)
     dataloader_pin_memory: bool = field(default=True)
     dataloader_num_workers: int = field(default=0)
     dataloader_persistent_workers: bool = field(default=False)
@@ -455,6 +465,30 @@ class LossConfig:
     success_positive_weight: float = field(
         default=1.0,
         metadata={"help": "Positive class weight for BCEWithLogits loss in success prediction (pos_weight)."},
+    )
+    success_balance_classes: bool = field(
+        default=True,
+        metadata={"help": "Whether to automatically balance positive and negative frames in success loss."},
+    )
+    future_atomic_negative_weight: float = field(
+        default=1.0,
+        metadata={"help": "Extra per-sample success loss weight for targeted future atomic instruction negatives."},
+    )
+    success_pairwise_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for paired future-atomic success ranking loss."},
+    )
+    success_pairwise_margin: float = field(
+        default=0.0,
+        metadata={"help": "Margin for paired future-atomic success ranking loss."},
+    )
+    progress_pairwise_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for paired future-atomic progress ranking loss."},
+    )
+    progress_pairwise_margin: float = field(
+        default=0.0,
+        metadata={"help": "Margin for paired future-atomic progress ranking loss."},
     )
     predict_last_frame_progress: bool = field(
         default=False,
@@ -514,10 +548,7 @@ class LoggingConfig:
 
     save_model: bool = field(default=True)
     save_processor: bool = field(default=True)
-    log_train_memory: bool = field(
-        default=False,
-        metadata={"help": "Whether to print per-step training memory diagnostics to the console."},
-    )
+    log_train_memory: bool = field(default=False)
     # Logging backends
     log_to: List[str] = field(
         default_factory=list,

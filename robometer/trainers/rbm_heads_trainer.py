@@ -34,7 +34,6 @@ from robometer.utils.timer import _timer
 from robometer.utils.video_utils import create_policy_ranking_grid
 
 logger = get_logger()
-LABELED_PROGRESS_QUALITY_LABELS = {"successful_labeled", "suboptimal_labeled", "failure_labeled"}
 
 
 def seed_worker(worker_id):
@@ -145,6 +144,10 @@ class RBMHeadsTrainer(Trainer):
                 is_main_process=is_rank_0(),
                 log_level=log_level,
             )
+
+        # Use loguru logger after it's been initialized
+        loguru_logger = get_logger()
+        loguru_logger.info(f"DDP find_unused_parameters: {getattr(self.args, 'ddp_find_unused_parameters', 'N/A')}")
 
     def create_optimizer(self):
         """
@@ -451,9 +454,8 @@ class RBMHeadsTrainer(Trainer):
             except Exception as e:
                 logger.warning(f"Error logging metadata: {e}")
 
-        # Keep per-step memory diagnostics opt-in so normal training stays readable.
-        if self.config.logging.log_train_memory:
-            log_memory_usage(f"Step {self.state.global_step}")
+        # Log GPU memory usage at every training step for diagnostics
+        log_memory_usage(f"Step {self.state.global_step}")
 
         return loss
 
@@ -675,7 +677,6 @@ class RBMHeadsTrainer(Trainer):
         # make sure values are floats so they are loggable into wandb reports
         log_data = {k: float(v) for k, v in log_data.items()}
 
-        # Training scalars go to wandb/tensorboard at training.logging_steps cadence.
         self.logger.log_scalars(log_data, step=self.state.global_step + 1)
 
         if is_rank_0():
@@ -1630,7 +1631,6 @@ class RBMHeadsTrainer(Trainer):
             for timing_key, timing_value in eval_dataset_timings.items():
                 to_log[timing_key] = float(timing_value)
 
-            # Eval/custom-eval scalars use eval_steps/custom_eval_steps rather than training.logging_steps.
             self.logger.log_scalars(to_log, step=eval_step)
 
             # Log timing summary to console
@@ -1800,7 +1800,8 @@ class RBMHeadsTrainer(Trainer):
         num_preferences = inputs.get("num_preferences", 0)
         num_progress = inputs.get("num_progress", 0)
 
-        total_loss = 0
+        loss_device = next(model.parameters()).device
+        total_loss = torch.tensor(0.0, device=loss_device)
         log_metadata = {}
 
         logger.trace(f"Num preferences: {num_preferences}, Num progress: {num_progress}")
@@ -1817,8 +1818,11 @@ class RBMHeadsTrainer(Trainer):
                     logger.warning(f"NaN detected in preference loss, replacing with 0.0")
                 log_metadata.update(loss_dict)
 
-        # Compute progress loss if we have progress samples
-        if num_progress > 0 and progress_inputs and self.config.model.train_progress_head:
+        # Progress batches also carry success labels, so keep this branch active for
+        # success-only training runs.
+        if num_progress > 0 and progress_inputs and (
+            self.config.model.train_progress_head or self.config.model.train_success_head
+        ):
             with _timer("time/compute_progress_loss", timing_raw=self.timing_raw):
                 progress_loss, loss_dict = self._compute_progress_loss(
                     model, progress_inputs, return_outputs=True, training=training
@@ -1838,11 +1842,6 @@ class RBMHeadsTrainer(Trainer):
             logger.warning(f"NaN detected in total_loss, replacing with 0.0")
             total_loss = torch.tensor(0.0, device=total_loss.device, dtype=total_loss.dtype)
 
-        metric_prefix = "train" if training else "eval"
-        log_metadata[f"{metric_prefix}/loss"] = total_loss.item()
-        if training:
-            log_metadata["loss"] = total_loss.item()
-
         # Always store custom losses for logging (even when return_outputs=False)
         self.log_metadata = log_metadata
 
@@ -1854,7 +1853,15 @@ class RBMHeadsTrainer(Trainer):
         return total_loss
 
     def _compute_success_loss_helper(
-        self, success_logits, target_progress, success_labels, progress_loss_mask=None, quality_labels=None
+        self,
+        success_logits,
+        target_progress,
+        success_labels,
+        progress_loss_mask=None,
+        quality_labels=None,
+        sample_loss_weights=None,
+        metadata=None,
+        valid_frame_mask=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Helper function to compute success prediction loss.
@@ -1876,6 +1883,9 @@ class RBMHeadsTrainer(Trainer):
             quality_labels: Optional list of quality labels (e.g., "successful", "suboptimal", "failure") for each sample.
                 If a trajectory has quality_label in ["suboptimal", "failure", "failed"], we always predict success=0
                 and verify that success_labels are all 0s.
+            sample_loss_weights: Optional per-sample weights, broadcast over frames.
+            metadata: Optional per-sample metadata, used for paired future-atomic ranking loss.
+            valid_frame_mask: Optional per-frame mask used to exclude padded frames.
 
         Returns:
             tuple: (success_loss, success_accuracy, success_auprc, metrics)
@@ -1883,6 +1893,7 @@ class RBMHeadsTrainer(Trainer):
         """
         # Get base thresholds from config
         min_success = self.config.data.min_success
+
         # Handle Qwen/Molmo downsampling: take every 2nd frame if using Qwen/Molmo and NOT using multi_image
         # In multi_image mode, we already get one embedding per frame, so no downsampling needed
         # Ensure success_logits matches target_progress length after downsampling
@@ -1892,6 +1903,24 @@ class RBMHeadsTrainer(Trainer):
             success_logits = success_logits[:, ::2]
             target_progress = target_progress[:, ::2]
             success_labels = success_labels[:, ::2]
+            if valid_frame_mask is not None:
+                valid_frame_mask = valid_frame_mask[:, ::2]
+
+        if valid_frame_mask is None:
+            valid_frame_mask = torch.ones(
+                success_logits.shape[:2],
+                device=success_logits.device,
+                dtype=torch.float32,
+            )
+        else:
+            valid_frame_mask = valid_frame_mask.to(device=success_logits.device, dtype=torch.float32)
+            if valid_frame_mask.ndim == 1:
+                valid_frame_mask = valid_frame_mask.unsqueeze(0)
+            if valid_frame_mask.shape[1] > success_logits.shape[1]:
+                valid_frame_mask = valid_frame_mask[:, : success_logits.shape[1]]
+            elif valid_frame_mask.shape[1] < success_logits.shape[1]:
+                pad_width = success_logits.shape[1] - valid_frame_mask.shape[1]
+                valid_frame_mask = F.pad(valid_frame_mask, (0, pad_width), value=0.0)
 
         # Handle suboptimal/failure trajectories: always predict success=0 and verify labels are all 0s
         # Create a mask for suboptimal/failure trajectories: always include all frames for these trajectories
@@ -1925,6 +1954,7 @@ class RBMHeadsTrainer(Trainer):
 
         # We predict success for frames where progress < min_success or the frame is a success
         combined_mask = ((target_progress < min_success) | (success_labels > 0.5)).float()
+        combined_mask = combined_mask * valid_frame_mask
 
         # Incorporate quality mask: always include all frames for suboptimal/failure trajectories
         if quality_mask is not None:
@@ -1940,11 +1970,12 @@ class RBMHeadsTrainer(Trainer):
         num_positives = (success_labels * combined_mask).sum()
         num_negatives = ((1 - success_labels) * combined_mask).sum()
 
-        # Compute per-sample weights to balance classes
-        # Weight the minority class so both classes contribute equally to the loss
-        # success_loss_weight = max(num_pos, num_neg) / min(num_pos, num_neg)
-        # Applied to whichever class has fewer samples
-        if num_positives > 0 and num_negatives > 0:
+        # Compute per-sample weights. By default, keep the original behavior of
+        # balancing positive and negative frames. For instruction hard-negatives,
+        # this can be disabled so future-task false positives are not offset by
+        # upweighted sparse positive frames.
+        balance_success_classes = getattr(self.config.loss, "success_balance_classes", True)
+        if balance_success_classes and num_positives > 0 and num_negatives > 0:
             if num_positives < num_negatives:
                 # Positives are minority - weight them up
                 success_loss_weight = (num_negatives / num_positives).detach()
@@ -1965,6 +1996,29 @@ class RBMHeadsTrainer(Trainer):
             success_loss_weight = torch.tensor(1.0, device=success_logits.device, dtype=success_logits.dtype)
             sample_weights = combined_mask
 
+        success_positive_weight = getattr(self.config.loss, "success_positive_weight", 1.0)
+        if success_positive_weight != 1.0:
+            positive_weight = torch.tensor(
+                success_positive_weight,
+                device=success_logits.device,
+                dtype=success_logits.dtype,
+            )
+            sample_weights = torch.where(success_labels > 0.5, sample_weights * positive_weight, sample_weights)
+
+        if sample_loss_weights is not None:
+            if not torch.is_tensor(sample_loss_weights):
+                sample_loss_weights = torch.tensor(
+                    sample_loss_weights,
+                    device=success_logits.device,
+                    dtype=success_logits.dtype,
+                )
+            else:
+                sample_loss_weights = sample_loss_weights.to(device=success_logits.device, dtype=success_logits.dtype)
+
+            if sample_loss_weights.ndim == 1:
+                sample_loss_weights = sample_loss_weights.unsqueeze(-1)
+            sample_weights = sample_weights * sample_loss_weights
+
         # Compute BCE loss with per-sample weights (includes combined_mask)
         loss = F.binary_cross_entropy_with_logits(
             success_logits,
@@ -1973,8 +2027,46 @@ class RBMHeadsTrainer(Trainer):
             reduction="none",
         )
         combined_mask_index = combined_mask.bool()
-        loss = (loss * combined_mask) / (sample_weights + 1e-8)
+        loss = loss * combined_mask
         success_loss = loss[combined_mask_index].mean()
+
+        pairwise_loss = torch.tensor(0.0, device=success_logits.device, dtype=success_logits.dtype)
+        pairwise_count = torch.tensor(0.0, device=success_logits.device, dtype=torch.float32)
+        pairwise_weight = getattr(self.config.loss, "success_pairwise_weight", 0.0)
+        if pairwise_weight and metadata:
+            pairs: Dict[str, Dict[str, int]] = {}
+            for sample_idx, item in enumerate(metadata):
+                if not isinstance(item, dict):
+                    continue
+                pair_id = item.get("future_atomic_pair_id")
+                role = item.get("future_atomic_pair_role")
+                if pair_id and role in ("positive", "negative"):
+                    pairs.setdefault(str(pair_id), {})[role] = sample_idx
+
+            pair_losses = []
+            margin = getattr(self.config.loss, "success_pairwise_margin", 0.0)
+            for roles in pairs.values():
+                if "positive" not in roles or "negative" not in roles:
+                    continue
+                positive_idx = roles["positive"]
+                negative_idx = roles["negative"]
+                if positive_idx >= success_logits.shape[0] or negative_idx >= success_logits.shape[0]:
+                    continue
+
+                positive_valid = valid_frame_mask[positive_idx].bool()
+                negative_valid = valid_frame_mask[negative_idx].bool()
+                if not positive_valid.any() or not negative_valid.any():
+                    continue
+
+                positive_final_pos = torch.nonzero(positive_valid, as_tuple=False).flatten()[-1]
+                positive_final_logit = success_logits[positive_idx, positive_final_pos]
+                negative_max_logit = success_logits[negative_idx][negative_valid].max()
+                pair_losses.append(F.softplus(negative_max_logit - positive_final_logit + margin))
+
+            if pair_losses:
+                pairwise_loss = torch.stack(pair_losses).mean()
+                pairwise_count = torch.tensor(float(len(pair_losses)), device=success_logits.device, dtype=torch.float32)
+                success_loss = success_loss + pairwise_weight * pairwise_loss
 
         # Compute accuracy per sample
         success_preds = (torch.sigmoid(success_logits) > 0.5).float()
@@ -2039,6 +2131,8 @@ class RBMHeadsTrainer(Trainer):
             "success_loss_weight": success_loss_weight,
             "num_positives": num_positives,
             "num_negatives": num_negatives,
+            "pairwise_loss": pairwise_loss,
+            "pairwise_count": pairwise_count,
         }
 
         return success_loss, success_acc, batch_auprc, metrics
@@ -2206,6 +2300,78 @@ class RBMHeadsTrainer(Trainer):
 
         return progress_loss, spearman_corr, metrics
 
+    def _compute_progress_pairwise_loss(
+        self,
+        progress_pred: torch.Tensor,
+        metadata: Optional[List[dict]],
+        valid_frame_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Rank correct atomic progress above same-video future atomic progress."""
+        pairwise_loss = torch.tensor(0.0, device=progress_pred.device, dtype=progress_pred.dtype)
+        pairwise_count = torch.tensor(0.0, device=progress_pred.device, dtype=torch.float32)
+        if not metadata:
+            return pairwise_loss, pairwise_count
+
+        if self.config.loss.progress_loss_type.lower() == "discrete":
+            progress_scores = convert_bins_to_continuous(progress_pred)
+        else:
+            progress_scores = progress_pred
+
+        if valid_frame_mask is None:
+            valid_frame_mask = torch.ones(
+                progress_scores.shape[:2],
+                device=progress_scores.device,
+                dtype=torch.float32,
+            )
+        else:
+            valid_frame_mask = valid_frame_mask.to(device=progress_scores.device, dtype=torch.float32)
+            if (
+                "Qwen" in self.config.model.base_model_id or "Molmo" in self.config.model.base_model_id
+            ) and not self.config.data.use_multi_image:
+                valid_frame_mask = valid_frame_mask[:, ::2]
+            if valid_frame_mask.ndim == 1:
+                valid_frame_mask = valid_frame_mask.unsqueeze(0)
+            if valid_frame_mask.shape[1] > progress_scores.shape[1]:
+                valid_frame_mask = valid_frame_mask[:, : progress_scores.shape[1]]
+            elif valid_frame_mask.shape[1] < progress_scores.shape[1]:
+                pad_width = progress_scores.shape[1] - valid_frame_mask.shape[1]
+                valid_frame_mask = F.pad(valid_frame_mask, (0, pad_width), value=0.0)
+
+        pairs: Dict[str, Dict[str, int]] = {}
+        for sample_idx, item in enumerate(metadata):
+            if not isinstance(item, dict):
+                continue
+            pair_id = item.get("future_atomic_pair_id")
+            role = item.get("future_atomic_pair_role")
+            if pair_id and role in ("positive", "negative"):
+                pairs.setdefault(str(pair_id), {})[role] = sample_idx
+
+        pair_losses = []
+        margin = getattr(self.config.loss, "progress_pairwise_margin", 0.0)
+        for roles in pairs.values():
+            if "positive" not in roles or "negative" not in roles:
+                continue
+            positive_idx = roles["positive"]
+            negative_idx = roles["negative"]
+            if positive_idx >= progress_scores.shape[0] or negative_idx >= progress_scores.shape[0]:
+                continue
+
+            positive_valid = valid_frame_mask[positive_idx].bool()
+            negative_valid = valid_frame_mask[negative_idx].bool()
+            if not positive_valid.any() or not negative_valid.any():
+                continue
+
+            positive_final_pos = torch.nonzero(positive_valid, as_tuple=False).flatten()[-1]
+            positive_final_score = progress_scores[positive_idx, positive_final_pos]
+            negative_max_score = progress_scores[negative_idx][negative_valid].max()
+            pair_losses.append(F.softplus(negative_max_score - positive_final_score + margin))
+
+        if pair_losses:
+            pairwise_loss = torch.stack(pair_losses).mean()
+            pairwise_count = torch.tensor(float(len(pair_losses)), device=progress_pred.device, dtype=torch.float32)
+
+        return pairwise_loss, pairwise_count
+
     def _add_stratified_metrics(
         self,
         outputs_dict: Dict[str, Any],
@@ -2305,6 +2471,7 @@ class RBMHeadsTrainer(Trainer):
                     # Qwen-specific parameters
                     "image_grid_thw": inputs.get("image_grid_thw", None),
                     "video_grid_thw": inputs.get("video_grid_thw", None),
+                    "mm_token_type_ids": inputs.get("mm_token_type_ids", None),
                     "second_per_grid_ts": inputs.get("second_per_grid_ts", None),
                     # Molmo2-specific parameters
                     "image_grids": inputs.get("image_grids", None),
@@ -2345,21 +2512,46 @@ class RBMHeadsTrainer(Trainer):
         progress_loss, spearman_corr, progress_metrics = self._compute_progress_loss_helper(
             progress_pred, progress_target, progress_target_mask, predict_last_frame_mask=predict_last_frame_mask
         )
-        final_loss = 0
+        progress_pairwise_loss = torch.tensor(0.0, device=progress_pred.device, dtype=progress_pred.dtype)
+        progress_pairwise_count = torch.tensor(0.0, device=progress_pred.device, dtype=torch.float32)
+        progress_pairwise_weight = getattr(self.config.loss, "progress_pairwise_weight", 0.0)
+        if progress_pairwise_weight:
+            progress_pairwise_loss, progress_pairwise_count = self._compute_progress_pairwise_loss(
+                progress_pred,
+                inputs.get("metadata"),
+                valid_frame_mask=inputs.get("padding_mask"),
+            )
+            progress_loss = progress_loss + progress_pairwise_weight * progress_pairwise_loss
+        final_loss = torch.tensor(0.0, device=progress_pred.device, dtype=progress_pred.dtype)
 
-        final_loss += progress_loss
+        if self.config.model.train_progress_head:
+            final_loss += progress_loss
         if self.config.model.train_success_head:
             success_logits = model_output.success_logits
             success_pred = success_logits["A"]
             success_labels = inputs["success_labels"]
 
             quality_labels = inputs.get("quality_labels", None)
+            sample_loss_weights = None
+            future_atomic_negative_weight = getattr(self.config.loss, "future_atomic_negative_weight", 1.0)
+            if future_atomic_negative_weight != 1.0:
+                metadata = inputs.get("metadata") or []
+                sample_loss_weights = [
+                    future_atomic_negative_weight
+                    if isinstance(item, dict) and item.get("targeted_future_atomic_negative")
+                    else 1.0
+                    for item in metadata
+                ]
+
             success_loss, success_accuracy, success_auprc, success_metrics = self._compute_success_loss_helper(
                 success_pred,
                 progress_target,
                 success_labels,
                 progress_loss_mask=progress_target_mask,
                 quality_labels=quality_labels,
+                sample_loss_weights=sample_loss_weights,
+                metadata=inputs.get("metadata"),
+                valid_frame_mask=inputs.get("padding_mask"),
             )
             # success_loss is already balanced via per-sample weighting of minority class
             if not torch.isnan(success_loss).any():
@@ -2398,6 +2590,8 @@ class RBMHeadsTrainer(Trainer):
             outputs_dict.update({
                 f"{prefix}/prog_loss": progress_loss.item(),
                 f"{prefix}/spearman_corr": spearman_corr.item(),
+                f"{prefix}/progress_pairwise_loss": progress_pairwise_loss.item(),
+                f"{prefix}/progress_pairwise_count": progress_pairwise_count.item(),
             })
 
             # Add progress accuracy for discrete mode
@@ -2435,6 +2629,8 @@ class RBMHeadsTrainer(Trainer):
                     else success_loss_weight,
                     f"{prefix}/success_num_positives": success_metrics["num_positives"].item(),
                     f"{prefix}/success_num_negatives": success_metrics["num_negatives"].item(),
+                    f"{prefix}/success_pairwise_loss": success_metrics["pairwise_loss"].item(),
+                    f"{prefix}/success_pairwise_count": success_metrics["pairwise_count"].item(),
                 })
 
         if not return_outputs:
