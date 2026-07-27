@@ -168,6 +168,33 @@ class LocalHFDatasetPreprocessor:
             return list(range(total_frames))
         return [int(i * total_frames / m) for i in range(m)]
 
+    def _sample_aligned_video_progress_indices(
+        self, total_video_frames: int, total_progress_labels: int
+    ) -> tuple[list[int], list[int], int]:
+        """Return aligned video/progress indices and the dropped video prefix length.
+
+        Some ManiSkill recordings contain one initial video frame before the first
+        action-aligned progress label. In that case, drop only that initial frame so
+        the final task state remains available for training.
+        """
+        if total_progress_labels <= 0:
+            raise ValueError("target_progress must be non-empty")
+
+        if total_video_frames == total_progress_labels:
+            video_frame_offset = 0
+        elif total_video_frames == total_progress_labels + 1:
+            video_frame_offset = 1
+        else:
+            raise ValueError(
+                "video/progress length mismatch: "
+                f"video_frames={total_video_frames}, target_progress={total_progress_labels}; "
+                "only equal lengths or one extra initial video frame are supported"
+            )
+
+        progress_indices = self._sample_indices_uniform(total_progress_labels)
+        video_indices = [idx + video_frame_offset for idx in progress_indices]
+        return video_indices, progress_indices, video_frame_offset
+
     def _validate_and_get_progress(self, ex: dict[str, Any], sampled_indices: list[int]) -> list[float]:
         if "target_progress" not in ex:
             raise ValueError(f"missing required field: target_progress for id={ex.get('id')}")
@@ -305,11 +332,16 @@ class LocalHFDatasetPreprocessor:
 
             vr = decord.VideoReader(video_path, num_threads=1)
             total_frames = len(vr)
-            sampled_indices = self._sample_indices_uniform(total_frames)
-            frames_array = vr.get_batch(sampled_indices).asnumpy()
+            raw_progress = ex.get("target_progress")
+            if not isinstance(raw_progress, (list, tuple)):
+                raise ValueError(f"target_progress must be a sequence for id={ex_id}")
+            video_indices, progress_indices, video_frame_offset = self._sample_aligned_video_progress_indices(
+                total_frames, len(raw_progress)
+            )
+            frames_array = vr.get_batch(video_indices).asnumpy()
             del vr
 
-            sampled_progress = self._validate_and_get_progress(ex, sampled_indices)
+            sampled_progress = self._validate_and_get_progress(ex, progress_indices)
             if len(sampled_progress) != int(frames_array.shape[0]):
                 raise ValueError(
                     f"sampled target_progress length mismatch for id={ex_id}: "
@@ -340,15 +372,27 @@ class LocalHFDatasetPreprocessor:
                 vid_shape = tuple(video_emb.shape)
                 txt_shape = tuple(text_emb.shape)
 
-            out = dict(ex)
-            out["frames"] = frames_path
-            out["frames_shape"] = tuple(frames_array.shape)
-            out["num_frames"] = int(frames_array.shape[0])
-            out["frames_processed"] = True
-            out["target_progress"] = sampled_progress
-            out["partial_success"] = partial_success
-            out["lang_vector"] = lang_vector
-            out.pop("frames_video", None)
+            # Keep a stable training schema. Raw autolabel rows contain task-specific
+            # nested fields (for example way_points and stage_records) whose Arrow
+            # types cannot be concatenated across tasks.
+            out = {
+                "id": str(ex_id),
+                "task": str(ex["task"]),
+                "data_source": str(ex.get("data_source", "unknown")),
+                "quality_label": str(ex.get("quality_label", "successful")),
+                "is_robot": bool(ex.get("is_robot", True)),
+                "frames": frames_path,
+                "frames_shape": tuple(frames_array.shape),
+                "num_frames": int(frames_array.shape[0]),
+                "frames_processed": True,
+                "target_progress": sampled_progress,
+                "partial_success": partial_success,
+                "lang_vector": lang_vector,
+                "metadata": {
+                    "video_path": video_path,
+                    "video_frame_offset": video_frame_offset,
+                },
+            }
 
             if emb_path is not None:
                 out["embeddings_path"] = emb_path

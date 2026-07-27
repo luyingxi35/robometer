@@ -117,34 +117,33 @@ class PrefSampler(RBMBaseSampler):
                 f"{preferred_strategy.value}; only same-task quality pairing or different_task are supported."
             )
 
+        strategy_was_sampled = preferred_strategy is None
         if preferred_strategy is None:
-            preferred_strategy = DataGenStrat.SUBOPTIMAL
+            preferred_strategy = self._sample_labeled_progress_pref_strategy()
 
         if preferred_strategy == DataGenStrat.SUBOPTIMAL:
-            if quality_label in {"successful_labeled", "suboptimal_labeled"}:
-                ref_task_key = self._get_labeled_task_key(item)
-                failure_indices = self.labeled_failure_indices_by_task_key.get(ref_task_key, [])
+            sample = self._create_labeled_same_task_pref_sample(item)
+            if sample is not None:
+                return sample
 
-                if failure_indices:
-                    chosen_traj_dict = item
-                    rejected_traj_dict = self.dataset[random.choice(failure_indices)]
-                    chosen_trajectory = self._get_traj_from_data(chosen_traj_dict, subsample_strategy="subsample_forward")
-                    rejected_trajectory = self._get_traj_from_data(rejected_traj_dict, subsample_strategy="subsample_forward")
-                    if chosen_trajectory is None or rejected_trajectory is None:
-                        return None
-
-                    return PreferenceSample(
-                        chosen_trajectory=chosen_trajectory,
-                        rejected_trajectory=rejected_trajectory,
-                        data_gen_strategy=DataGenStrat.SUBOPTIMAL.value,
-                    )
-
-            preferred_strategy = DataGenStrat.DIFFERENT_TASK
+            sample = self._create_labeled_different_task_pref_sample(item)
+            if sample is not None:
+                return sample
 
         if preferred_strategy == DataGenStrat.DIFFERENT_TASK:
             sample = self._create_labeled_different_task_pref_sample(item)
             if sample is not None:
                 return sample
+
+            # A sampled different-task strategy can be unavailable for a single-task
+            # dataset. Fall back to the other legal strategy instead of randomly
+            # failing otherwise valid single-task training items.
+            if strategy_was_sampled:
+                sample = self._create_labeled_same_task_pref_sample(item)
+                if sample is not None:
+                    return sample
+
+        if preferred_strategy in {DataGenStrat.SUBOPTIMAL, DataGenStrat.DIFFERENT_TASK}:
             raise ValueError(
                 f"Labeled-progress trajectory {item.get('id')} could not form a legal rejected pair: "
                 "no allowed same-task failure_labeled match and different_task generation failed."
@@ -153,6 +152,60 @@ class PrefSampler(RBMBaseSampler):
         raise ValueError(
             f"Labeled-progress trajectory {item.get('id')} received unsupported preferred strategy "
             f"{preferred_strategy.value}; only suboptimal(same-task quality) and different_task are allowed."
+        )
+
+    def _sample_labeled_progress_pref_strategy(self) -> DataGenStrat:
+        """Sample one of the two legal labeled-progress preference strategies."""
+        if len(self.preference_strategy_ratio) < 3:
+            raise ValueError(
+                "preference_strategy_ratio must contain at least "
+                "[rewind, suboptimal_same_task, different_task]."
+            )
+
+        same_task_weight = self.preference_strategy_ratio[1]
+        different_task_weight = self.preference_strategy_ratio[2]
+        if same_task_weight < 0 or different_task_weight < 0:
+            raise ValueError(
+                "Labeled-progress preference strategy weights must be non-negative: "
+                f"suboptimal={same_task_weight}, different_task={different_task_weight}."
+            )
+
+        total_weight = same_task_weight + different_task_weight
+        if total_weight <= 0:
+            raise ValueError(
+                "Labeled-progress preference sampling requires a positive weight for "
+                "suboptimal_same_task or different_task."
+            )
+
+        if self._local_random.random() < same_task_weight / total_weight:
+            return DataGenStrat.SUBOPTIMAL
+        return DataGenStrat.DIFFERENT_TASK
+
+    def _create_labeled_same_task_pref_sample(
+        self, chosen_traj_dict: Dict[str, Any]
+    ) -> PreferenceSample | None:
+        if chosen_traj_dict.get("quality_label") not in {"successful_labeled", "suboptimal_labeled"}:
+            return None
+
+        ref_task_key = self._get_labeled_task_key(chosen_traj_dict)
+        failure_indices = self.labeled_failure_indices_by_task_key.get(ref_task_key, [])
+        if not failure_indices:
+            return None
+
+        rejected_traj_dict = self.dataset[random.choice(failure_indices)]
+        chosen_trajectory = self._get_traj_from_data(
+            chosen_traj_dict, subsample_strategy="subsample_forward"
+        )
+        rejected_trajectory = self._get_traj_from_data(
+            rejected_traj_dict, subsample_strategy="subsample_forward"
+        )
+        if chosen_trajectory is None or rejected_trajectory is None:
+            return None
+
+        return PreferenceSample(
+            chosen_trajectory=chosen_trajectory,
+            rejected_trajectory=rejected_trajectory,
+            data_gen_strategy=DataGenStrat.SUBOPTIMAL.value,
         )
 
     def _get_labeled_task_key(self, traj: Dict[str, Any]) -> str:

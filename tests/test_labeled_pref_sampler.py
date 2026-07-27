@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from robometer.configs.experiment_configs import DataConfig
 from robometer.data.datasets.helpers import DataGenStrat, compute_success_labels
@@ -56,11 +56,14 @@ class TestLabeledPrefSampler(unittest.TestCase):
             "tasks_with_multiple_quality_labels": [],
         }
 
-    def _make_sampler(self, dataset, combined_indices):
+    def _make_sampler(self, dataset, combined_indices, preference_strategy_ratio=None):
         if isinstance(dataset, list):
             dataset = FakeHFDataset(dataset)
+        config = self._make_config()
+        if preference_strategy_ratio is not None:
+            config.preference_strategy_ratio = preference_strategy_ratio
         sampler = PrefSampler(
-            config=self._make_config(),
+            config=config,
             dataset=dataset,
             combined_indices=combined_indices,
             dataset_success_cutoff_map={},
@@ -218,7 +221,9 @@ class TestLabeledPrefSampler(unittest.TestCase):
         sampler._get_traj_from_data = self._fake_get_traj
 
         dataset.row_access_count = 0
-        sample = sampler._create_labeled_progress_pref_sample(dataset[0])
+        sample = sampler._create_labeled_progress_pref_sample(
+            dataset[0], preferred_strategy=DataGenStrat.SUBOPTIMAL
+        )
 
         self.assertEqual(sample.rejected_trajectory.id, "PegInsertionVertical-v1_fail_to_grasp_grasp_3")
         self.assertLessEqual(
@@ -256,6 +261,142 @@ class TestLabeledPrefSampler(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "does not allow rejected strategy"):
             sampler._create_labeled_progress_pref_sample(dataset[0], preferred_strategy=DataGenStrat.REWIND)
+
+    def test_default_labeled_strategy_uses_normalized_same_and_cross_task_weights(self):
+        dataset = [
+            {"id": "TaskA-v1_success_0", "task": "task a", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+            {"id": "TaskA-v1_failure_0", "task": "task a", "data_source": "labeled_source", "quality_label": "failure_labeled", "is_robot": True},
+            {"id": "TaskB-v1_success_0", "task": "task b", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+        ]
+        sampler = self._make_sampler(
+            dataset,
+            self._make_combined_indices({"unused": [0, 1, 2]}),
+            preference_strategy_ratio=[99, 3, 1, 99],
+        )
+        sampler._get_traj_from_data = self._fake_get_traj
+        sampler._local_random = Mock()
+
+        sampler._local_random.random.return_value = 0.74
+        same_task_sample = sampler._create_labeled_progress_pref_sample(dataset[0])
+        self.assertEqual(same_task_sample.data_gen_strategy, DataGenStrat.SUBOPTIMAL.value)
+        self.assertEqual(same_task_sample.rejected_trajectory.id, "TaskA-v1_failure_0")
+
+        sampler._local_random.random.return_value = 0.75
+        cross_task_sample = sampler._create_labeled_progress_pref_sample(dataset[0])
+        self.assertEqual(cross_task_sample.data_gen_strategy, DataGenStrat.DIFFERENT_TASK.value)
+        self.assertEqual(cross_task_sample.rejected_trajectory.id, "TaskB-v1_success_0")
+        self.assertEqual(cross_task_sample.rejected_trajectory.target_progress, [0.0, 0.0])
+        self.assertEqual(cross_task_sample.rejected_trajectory.success_label, [0.0, 0.0])
+
+    def test_sampled_suboptimal_falls_back_to_different_task_without_same_task_failure(self):
+        dataset = [
+            {"id": "TaskA-v1_success_0", "task": "task a", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+            {"id": "TaskB-v1_success_0", "task": "task b", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+        ]
+        sampler = self._make_sampler(
+            dataset,
+            self._make_combined_indices({"unused": [0, 1]}),
+            preference_strategy_ratio=[0, 1, 0, 0],
+        )
+        sampler._get_traj_from_data = self._fake_get_traj
+
+        sample = sampler._create_labeled_progress_pref_sample(dataset[0])
+
+        self.assertEqual(sample.data_gen_strategy, DataGenStrat.DIFFERENT_TASK.value)
+        self.assertEqual(sample.rejected_trajectory.id, "TaskB-v1_success_0")
+
+    def test_sampled_different_task_falls_back_to_same_task_for_single_task_data(self):
+        dataset = [
+            {"id": "TaskA-v1_success_0", "task": "task a", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+            {"id": "TaskA-v1_failure_0", "task": "task a", "data_source": "labeled_source", "quality_label": "failure_labeled", "is_robot": True},
+        ]
+        sampler = self._make_sampler(
+            dataset,
+            self._make_combined_indices({"unused": [0, 1]}),
+            preference_strategy_ratio=[0, 0, 1, 0],
+        )
+        sampler._get_traj_from_data = self._fake_get_traj
+
+        sample = sampler._create_labeled_progress_pref_sample(dataset[0])
+
+        self.assertEqual(sample.data_gen_strategy, DataGenStrat.SUBOPTIMAL.value)
+        self.assertEqual(sample.rejected_trajectory.id, "TaskA-v1_failure_0")
+
+    def test_single_task_without_failure_has_no_legal_labeled_pair(self):
+        dataset = [
+            {"id": "TaskA-v1_success_0", "task": "task a", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+        ]
+        sampler = self._make_sampler(dataset, self._make_combined_indices({"unused": [0]}))
+        sampler._get_traj_from_data = self._fake_get_traj
+
+        with self.assertRaisesRegex(ValueError, "could not form a legal rejected pair"):
+            sampler._create_labeled_progress_pref_sample(dataset[0])
+
+    def test_labeled_strategy_requires_a_positive_legal_weight(self):
+        dataset = [
+            {"id": "TaskA-v1_success_0", "task": "task a", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},
+        ]
+        sampler = self._make_sampler(
+            dataset,
+            self._make_combined_indices({"unused": [0]}),
+            preference_strategy_ratio=[1, 0, 0, 1],
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires a positive weight"):
+            sampler._create_labeled_progress_pref_sample(dataset[0])
+
+    def test_five_labeled_tasks_can_form_same_task_and_cross_task_pairs(self):
+        task_keys = [
+            "PegInsertionVertical-v1",
+            "PegInsertionSide-v1",
+            "PlugCharger-v1",
+            "PushCube-v1",
+            "StackCube-v1",
+        ]
+        dataset = []
+        for task_key in task_keys:
+            dataset.extend([
+                {
+                    "id": f"{task_key}_success_0",
+                    "task": f"perform {task_key}",
+                    "data_source": "labeled_source",
+                    "quality_label": "successful_labeled",
+                    "is_robot": True,
+                },
+                {
+                    "id": f"{task_key}_failure_0",
+                    "task": f"perform {task_key}",
+                    "data_source": "labeled_source",
+                    "quality_label": "failure_labeled",
+                    "is_robot": True,
+                },
+            ])
+
+        sampler = self._make_sampler(
+            dataset, self._make_combined_indices({"unused": list(range(len(dataset)))})
+        )
+        sampler._get_traj_from_data = self._fake_get_traj
+
+        for chosen_idx, task_key in zip(range(0, len(dataset), 2), task_keys):
+            same_task_sample = sampler._create_labeled_progress_pref_sample(
+                dataset[chosen_idx], preferred_strategy=DataGenStrat.SUBOPTIMAL
+            )
+            cross_task_sample = sampler._create_labeled_progress_pref_sample(
+                dataset[chosen_idx], preferred_strategy=DataGenStrat.DIFFERENT_TASK
+            )
+
+            self.assertEqual(
+                sampler._get_labeled_task_key(
+                    {"id": same_task_sample.rejected_trajectory.id}
+                ),
+                task_key,
+            )
+            self.assertNotEqual(
+                sampler._get_labeled_task_key(
+                    {"id": cross_task_sample.rejected_trajectory.id}
+                ),
+                task_key,
+            )
 
 
 if __name__ == "__main__":
