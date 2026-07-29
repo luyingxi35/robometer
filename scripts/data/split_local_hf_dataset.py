@@ -13,11 +13,12 @@ from collections import Counter
 
 from datasets import Dataset, load_from_disk
 
-REQUIRED_EVAL_LABEL_COUNTS = {
-    "successful_labeled": 30,
-    "failure_labeled": 30,
-    "suboptimal_labeled": 30,
-}
+REQUIRED_QUALITY_LABELS = (
+    "successful_labeled",
+    "failure_labeled",
+    "suboptimal_labeled",
+)
+DEFAULT_EVAL_COUNT_PER_LABEL = 30
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,7 +33,16 @@ def parse_args() -> argparse.Namespace:
         "--test-size",
         type=int,
         default=None,
-        help="Deprecated and ignored. Eval split size is fixed at 30 per required quality_label.",
+        help="Deprecated and ignored. Use --eval-count-per-label instead.",
+    )
+    parser.add_argument(
+        "--eval-count-per-label",
+        type=int,
+        default=DEFAULT_EVAL_COUNT_PER_LABEL,
+        help=(
+            "Number of eval rows sampled from each required quality_label "
+            f"(default: {DEFAULT_EVAL_COUNT_PER_LABEL})."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible shuffling")
     parser.add_argument(
@@ -46,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     args.eval_output = args.eval_output or args.test_output
     if not args.eval_output:
         raise ValueError("One of --eval-output or --test-output is required.")
+    if args.eval_count_per_label <= 0:
+        raise ValueError("--eval-count-per-label must be positive.")
     return args
 
 
@@ -58,11 +70,20 @@ def get_quality_label_counts(dataset: Dataset) -> Counter:
     return Counter(dataset["quality_label"])
 
 
-def select_eval_indices(dataset: Dataset, seed: int) -> tuple[list[int], Counter]:
+def select_eval_indices(
+    dataset: Dataset,
+    seed: int,
+    eval_count_per_label: int = DEFAULT_EVAL_COUNT_PER_LABEL,
+) -> tuple[list[int], Counter]:
     if "quality_label" not in dataset.column_names:
         raise ValueError("Input dataset must contain a 'quality_label' column.")
 
-    label_to_indices: dict[str, list[int]] = {label: [] for label in REQUIRED_EVAL_LABEL_COUNTS}
+    required_eval_label_counts = {
+        label: eval_count_per_label for label in REQUIRED_QUALITY_LABELS
+    }
+    label_to_indices: dict[str, list[int]] = {
+        label: [] for label in required_eval_label_counts
+    }
     for idx, quality_label in enumerate(dataset["quality_label"]):
         if quality_label in label_to_indices:
             label_to_indices[quality_label].append(idx)
@@ -70,12 +91,16 @@ def select_eval_indices(dataset: Dataset, seed: int) -> tuple[list[int], Counter
     available_counts = Counter({label: len(indices) for label, indices in label_to_indices.items()})
     insufficient = {
         label: required
-        for label, required in REQUIRED_EVAL_LABEL_COUNTS.items()
+        for label, required in required_eval_label_counts.items()
         if available_counts[label] < required
     }
     if insufficient:
-        counts_str = ", ".join(f"{label}={available_counts[label]}" for label in REQUIRED_EVAL_LABEL_COUNTS)
-        required_str = ", ".join(f"{label}={count}" for label, count in REQUIRED_EVAL_LABEL_COUNTS.items())
+        counts_str = ", ".join(
+            f"{label}={available_counts[label]}" for label in required_eval_label_counts
+        )
+        required_str = ", ".join(
+            f"{label}={count}" for label, count in required_eval_label_counts.items()
+        )
         raise ValueError(
             "Input dataset does not have enough rows for fixed eval sampling. "
             f"Required counts: {required_str}. Available counts: {counts_str}."
@@ -84,7 +109,7 @@ def select_eval_indices(dataset: Dataset, seed: int) -> tuple[list[int], Counter
     rng = random.Random(seed)
     eval_indices: list[int] = []
     eval_counts = Counter()
-    for label, required_count in REQUIRED_EVAL_LABEL_COUNTS.items():
+    for label, required_count in required_eval_label_counts.items():
         indices = list(label_to_indices[label])
         rng.shuffle(indices)
         selected = indices[:required_count]
@@ -106,7 +131,11 @@ def main() -> None:
 
     total_rows = len(dataset)
     source_counts = get_quality_label_counts(dataset)
-    eval_indices, eval_counts = select_eval_indices(dataset, seed=args.seed)
+    eval_indices, eval_counts = select_eval_indices(
+        dataset,
+        seed=args.seed,
+        eval_count_per_label=args.eval_count_per_label,
+    )
 
     eval_index_set = set(eval_indices)
     train_indices = [idx for idx in range(total_rows) if idx not in eval_index_set]
@@ -123,14 +152,14 @@ def main() -> None:
     for label, count in sorted(source_counts.items()):
         print(f"  {label}: {count}")
     print("Eval quality_label counts:")
-    for label in REQUIRED_EVAL_LABEL_COUNTS:
+    for label in REQUIRED_QUALITY_LABELS:
         print(f"  {label}: {eval_counts[label]}")
     print(f"Train rows: {len(train_dataset)} -> {args.train_output}")
     print(f"Eval rows: {len(eval_dataset)} -> {args.eval_output}")
     print(f"Seed: {args.seed}")
 
     if args.test_size is not None:
-        print("Note: --test-size is deprecated and ignored.")
+        print("Note: --test-size is deprecated and ignored; use --eval-count-per-label.")
 
 
 if __name__ == "__main__":
