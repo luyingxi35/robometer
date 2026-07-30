@@ -393,10 +393,6 @@ class RBMHeadsTrainer(Trainer):
             logger.warning("Model not in training mode, setting to train mode")
             model.train()
 
-        # Clear any stale gradients before starting
-        if hasattr(self, "optimizer") and self.optimizer is not None:
-            self.optimizer.zero_grad(set_to_none=True)
-
         with _timer("time/training_step", timing_raw=self.timing_raw):
             loss = super().training_step(model, inputs, num_items_in_batch)
 
@@ -443,7 +439,13 @@ class RBMHeadsTrainer(Trainer):
         # logger.trace("update resample attempt metrics")
 
         # Log custom losses at specified intervals (using our custom logger only)
-        if self.state.global_step % self.args.logging_steps == 0:
+        # With gradient accumulation, only log on the final micro-step. Logging
+        # performs distributed reductions and full-model norm scans, so running
+        # it for every micro-step is both redundant and very expensive.
+        if (
+            self.accelerator.sync_gradients
+            and self.state.global_step % self.args.logging_steps == 0
+        ):
             try:
                 self._log_metadata()
             except Exception as e:
@@ -2473,8 +2475,8 @@ class RBMHeadsTrainer(Trainer):
         target_progress_A = inputs["target_progress_A"]
         target_progress_A_mask = inputs["target_progress_A_mask"].unsqueeze(-1)
         data_gen_strat = inputs["trajectory_A_data_gen_strategy"]
-        logger.warning(f"DATA GEN STRAT FOR TRAJ A: {data_gen_strat}")
-        logger.warning(f"DATA SOURCE FOR TRAJ A: {inputs['trajectory_A_data_source']}")
+        logger.debug(f"DATA GEN STRAT FOR TRAJ A: {data_gen_strat}")
+        logger.debug(f"DATA SOURCE FOR TRAJ A: {inputs['trajectory_A_data_source']}")
         # logger.warning(f"PREFERENCE LABELS: {inputs['preference_labels']}")
 
         if self.config.model.train_progress_head and self.config.training.predict_pref_progress:
