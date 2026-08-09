@@ -202,7 +202,7 @@ def _load_checkpoint_weights_from_safetensors(
     cfg: ModelConfig,
     load_adapters: bool = True,
     prefer_model_shards: bool = False,
-) -> None:
+) -> tuple[list[str], list[str]]:
     """
     Load checkpoint weights from safetensors files in a checkpoint directory.
     Includes verification for PEFT adapters and progress_head.
@@ -408,11 +408,10 @@ def _load_checkpoint_weights_from_safetensors(
     )
 
     if not progress_head_loaded:
-        logger.error("Progress head weights did not change after loading checkpoint!")
-        logger.error("This indicates the checkpoint weights were not loaded correctly.")
-        import ipdb
-
-        ipdb.set_trace()  # Breakpoint if progress_head didn't load
+        raise RuntimeError(
+            "Progress head weights did not change after loading checkpoint; "
+            "the checkpoint was not loaded correctly."
+        )
 
     # Verify adapter weights loaded correctly only when this helper loads them.
     # If load_adapters=False, PeftModel.from_pretrained has already loaded adapters
@@ -476,12 +475,10 @@ def _load_checkpoint_weights_from_safetensors(
             adapter_loaded_correctly = False
 
     if not adapter_loaded_correctly:
-        logger.error("Adapter weights did not load correctly!")
-        import ipdb
-
-        ipdb.set_trace()  # Breakpoint if adapters didn't load correctly
+        raise RuntimeError("Adapter weights did not load correctly.")
 
     logger.info(f"Successfully loaded checkpoint weights from {checkpoint_path}")
+    return list(missing_keys), list(unexpected_keys)
 
 
 def _load_base_model_with_unsloth(
@@ -998,7 +995,6 @@ def setup_model_and_processor(
 
         # Load checkpoint if provided
         if hf_model_id:
-            repo_id, revision_to_load = parse_hf_model_id_and_revision(hf_model_id, model_name="model")
             checkpoint_path = checkpoint_path_for_load
             if checkpoint_path is None:
                 hub_token = os.environ.get("HF_TOKEN")
@@ -1084,38 +1080,22 @@ def setup_model_and_processor(
                         prefer_model_shards=True,
                     )
             else:
-                # For non-PEFT models, we can use from_pretrained as before
-                # Capture before weights for verification
-                before_weights = {}
-                if "Qwen2.5" in cfg.base_model_id:
-                    before_weights = {
-                        "visual": model.model.visual.blocks[0].mlp.down_proj.weight,
-                        "progress_head": model.progress_head[0].weight,
-                        "lm_embed_tokens": model.model.language_model.embed_tokens.weight,
-                        "lm_layer": model.model.language_model.layers[0].mlp.up_proj.weight,
-                    }
-                elif "Qwen3" in cfg.base_model_id or "Molmo" in cfg.base_model_id:
-                    before_weights = {
-                        "visual": model.model.visual.blocks[0].mlp.linear_fc1.weight,
-                        "progress_head": model.progress_head[0].weight,
-                        "lm_embed_tokens": model.model.language_model.embed_tokens.weight,
-                        "lm_layer": model.model.language_model.layers[0].mlp.up_proj.weight,
-                    }
-
-                # Load the model from the evaluation path
-                model = model_cls.from_pretrained(
-                    repo_id,
-                    processor=processor,
-                    tokenizer=tokenizer,
-                    base_model=base_model,
-                    base_model_id=cfg.base_model_id,
-                    model_config=cfg,
-                    revision=revision_to_load,
+                # Keep the wrapper constructed from base_model.config. Calling
+                # RBM.from_pretrained() here used to reinterpret Qwen3 config.json
+                # through a fixed Qwen2.5 config_class before RBM.__init__ ran.
+                missing_keys, unexpected_keys = _load_checkpoint_weights_from_safetensors(
+                    model,
+                    checkpoint_path,
+                    cfg,
+                    load_adapters=True,
+                    prefer_model_shards=True,
                 )
-
-                # Verify weights were loaded
-                if before_weights:
-                    _verify_checkpoint_loading(cfg, model, before_weights)
+                if missing_keys or unexpected_keys:
+                    raise RuntimeError(
+                        "Full-model checkpoint does not exactly match the reconstructed RBM: "
+                        f"{len(missing_keys)} missing key(s), {len(unexpected_keys)} unexpected key(s). "
+                        f"Missing sample: {missing_keys[:5]}; unexpected sample: {unexpected_keys[:5]}"
+                    )
 
     # elif "rewind_transformer" in cfg.base_model_id or "rewind_scale_transformer" in cfg.base_model_id:
     elif "rewind" in cfg.base_model_id:

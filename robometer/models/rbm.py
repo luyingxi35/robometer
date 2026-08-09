@@ -39,15 +39,45 @@ class RBM(PredictionHeadsMixin, PreTrainedModel):
 
     Supports multiple base model architectures:
     - Qwen2.5-VL (Qwen2_5_VLModel)
+    - Qwen3-VL / Molmo2 (Qwen3VLModel)
     - SmolVLM (AutoModelForImageTextToText)
     """
 
-    # unused param i think
-    config_class = Qwen2_5_VLModel.config_class
+    # RBM wraps several incompatible Transformers config classes. A fixed
+    # config_class (previously Qwen2_5_VLConfig) silently reinterprets Qwen3
+    # checkpoint configs before __init__ runs, so callers must provide the
+    # backbone config explicitly.
+    config_class = None
 
     # Declare support for SDPA and Flash Attention (will delegate to underlying model), needed for Qwen3
     _supports_sdpa = True
     _supports_flash_attn_2 = True
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        config=None,
+        base_model=None,
+        **kwargs,
+    ):
+        """Load RBM without guessing the heterogeneous backbone config type."""
+        if config is None:
+            if base_model is None:
+                raise ValueError(
+                    "RBM.from_pretrained() requires either an explicit `config` or a "
+                    "preloaded `base_model` whose config identifies the backbone architecture."
+                )
+            config = base_model.config
+
+        return super().from_pretrained(
+            pretrained_model_name_or_path,
+            *model_args,
+            config=config,
+            base_model=base_model,
+            **kwargs,
+        )
 
     def __init__(self, config, processor, tokenizer, base_model=None, base_model_id=None, model_config=None):
         if "SmolVLM" in base_model_id:
@@ -79,7 +109,6 @@ class RBM(PredictionHeadsMixin, PreTrainedModel):
         else:
             self.model = self.model_cls(config)
 
-        self.config_class = self.model_cls.config_class
         self.base_model_id = base_model_id
 
         self.model_dtype = self.model.dtype
