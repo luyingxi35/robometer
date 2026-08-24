@@ -21,7 +21,6 @@ from PIL import Image
 
 MAX_IMAGE_SIDE = 480  # bigger side
 MAX_IMAGE_PIXELS = 1024 * 1024  # safety cap (1.0 MP). raise to 1.5MP if stable
-LABELED_PROGRESS_QUALITY_LABELS = {"successful_labeled", "suboptimal_labeled", "failure_labeled"}
 
 
 def _resize_pil(pil: Image.Image, max_side: int = MAX_IMAGE_SIDE, max_pixels: int = MAX_IMAGE_PIXELS) -> Image.Image:
@@ -41,12 +40,6 @@ def _resize_pil(pil: Image.Image, max_side: int = MAX_IMAGE_SIDE, max_pixels: in
         pil = pil.resize((nw, nh), resample=Image.BICUBIC)
 
     return pil
-
-
-def _resize_pil_exact(pil: Image.Image, width: int, height: int) -> Image.Image:
-    """Resize an image to an exact size when the config explicitly requests it."""
-    pil = pil.convert("RGB")
-    return pil.resize((width, height), resample=Image.BICUBIC)
 
 
 def should_compute_progress(
@@ -90,8 +83,6 @@ def should_compute_progress(
     # If partial_success and not is_preference_only_ds, always compute progress
     # predict partial success for roboreward trajectories not preference only
     elif partial_success is not None and "roboreward" in data_source:
-        return 1.0
-    elif quality_label in LABELED_PROGRESS_QUALITY_LABELS:
         return 1.0
     elif quality_label in ["suboptimal", "failure", "failed"]:
         return 0.0
@@ -145,6 +136,7 @@ class RBMBatchCollator(BaseCollator):
         prog_pref: bool = False,
         use_per_frame_progress_token: bool = False,
         shuffle_progress_frames: bool = False,
+        pair_future_atomic_positive: bool = False,
         inference: bool = False,
         **kwargs,
     ):
@@ -175,6 +167,7 @@ class RBMBatchCollator(BaseCollator):
                 "Per-frame progress tokens can only be added in multi-image mode."
             )
         self.shuffle_progress_frames = shuffle_progress_frames
+        self.pair_future_atomic_positive = pair_future_atomic_positive
         self.inference = inference
 
     def _prepare_frames_for_conversation(self, frames: List, prefix: str = "tmp") -> tuple[Union[List, str], dict]:
@@ -191,15 +184,15 @@ class RBMBatchCollator(BaseCollator):
                 - content_extras: Dictionary with resized_height/width or empty dict
         """
         if self.use_multi_image:
-            # In multi-image mode, cap image resolution before passing frames to Qwen.
-            # Otherwise the processor receives full-resolution frames and vision tokens
-            # can explode enough to OOM even with FSDP.
-            if self.resized_height is not None and self.resized_width is not None:
-                frames = [
-                    _resize_pil_exact(frame, width=self.resized_width, height=self.resized_height) for frame in frames
-                ]
-            else:
-                frames = [_resize_pil(frame) for frame in frames]
+            # # Use images directly - return list of PIL Images
+            # if self.resized_height is not None and self.resized_width is not None:
+            #     content_extras = {
+            #         "resized_height": self.resized_height,
+            #         "resized_width": self.resized_width,
+            #     }
+            # else:
+            #     frames = [_resize_pil(frame) for frame in frames]
+            #     content_extras = {}
             content_extras = {}
             return frames, content_extras
         elif "Qwen" in self.base_model_id or "Molmo" in self.base_model_id:
@@ -357,6 +350,9 @@ class RBMBatchCollator(BaseCollator):
 
     def _process_progress_batch(self, progress_samples: list[ProgressSample]) -> dict[str, torch.Tensor]:
         """Process a batch of progress samples."""
+        if self.pair_future_atomic_positive and not self.inference:
+            progress_samples = self._expand_future_atomic_pairs(progress_samples)
+
         # Collect all messages for batch processing
         all_messages = []
 
@@ -384,7 +380,15 @@ class RBMBatchCollator(BaseCollator):
             video_field, content_extras = self._prepare_frames_for_conversation(frames, prefix="tmp_progress")
 
             # Create conversation for progress evaluation
-            prompt = f"The task for the robot is '{sample.trajectory.task}'. Given the trajectory video, predict the task progress at each frame, how far along the robot is towards completing the task, a float between 0 and 1, where 0 is the starting state and 1 is when the task is completed. If the robot is not performing the same task, predict 0 progress."
+            prompt = (
+                f"The exact task for the robot is '{sample.trajectory.task}'. Given the trajectory video, "
+                "predict the task progress at each frame, how far along the robot is towards completing this "
+                "exact task, a float between 0 and 1, where 0 is the starting state and 1 is when this exact "
+                "task is completed. Only assign nonzero progress if the video matches the exact object, "
+                "ordinal words, attributes, target location, and subtask order in the task text. If the video "
+                "shows a different object, an earlier or later subtask, or the same overall task but not this "
+                "exact subtask, predict 0 progress."
+            )
 
             # Build content list
             content_list = [{"type": "text", "text": prompt}]
@@ -409,6 +413,53 @@ class RBMBatchCollator(BaseCollator):
             )
         batch_inputs["resample_attempts"] = [sample.resample_attempts for sample in progress_samples]
         return batch_inputs
+
+    def _expand_future_atomic_pairs(self, progress_samples: list[ProgressSample]) -> list[ProgressSample]:
+        expanded: list[ProgressSample] = []
+        for sample in progress_samples:
+            metadata = sample.trajectory.metadata if isinstance(sample.trajectory.metadata, dict) else {}
+            if not (
+                metadata.get("targeted_future_atomic_negative")
+                and metadata.get("future_atomic_pair_id")
+                and metadata.get("paired_positive_task")
+                and metadata.get("paired_positive_target_progress") is not None
+                and metadata.get("paired_positive_success_label") is not None
+            ):
+                expanded.append(sample)
+                continue
+
+            pair_id = metadata["future_atomic_pair_id"]
+
+            negative_metadata = dict(metadata)
+            negative_metadata["future_atomic_pair_role"] = "negative"
+            negative_trajectory = sample.trajectory.model_copy(update={"metadata": negative_metadata})
+            expanded.append(sample.model_copy(update={"trajectory": negative_trajectory}))
+
+            positive_metadata = dict(metadata)
+            positive_metadata["future_atomic_pair_role"] = "positive"
+            positive_metadata["paired_future_atomic_positive"] = True
+            positive_metadata["targeted_future_atomic_negative"] = False
+            positive_metadata["paired_negative_instruction_task"] = metadata.get("negative_instruction_task")
+            positive_metadata["future_atomic_pair_id"] = pair_id
+
+            positive_trajectory = sample.trajectory.model_copy(
+                update={
+                    "task": metadata["paired_positive_task"],
+                    "target_progress": metadata["paired_positive_target_progress"],
+                    "success_label": metadata["paired_positive_success_label"],
+                    "metadata": positive_metadata,
+                }
+            )
+            expanded.append(
+                sample.model_copy(
+                    update={
+                        "trajectory": positive_trajectory,
+                        "data_gen_strategy": "future_atomic_paired_positive",
+                    }
+                )
+            )
+
+        return expanded
 
     def _add_progress_meta(
         self,
@@ -492,7 +543,13 @@ class RBMBatchCollator(BaseCollator):
 
             if self.prog_pref:
                 # We ask the model to predict both of the task progress and preference
-                task_prompt = f" Also predict the task progress at each frame of the first trajectory, how far along the robot is towards completing the task, a float between 0 and 1, where 0 is the starting state and 1 is when the task is completed. If the robot is not performing the same task, predict 0 progress."
+                task_prompt = (
+                    " Also predict the task progress at each frame of the first trajectory, how far along "
+                    "the robot is towards completing the exact task, a float between 0 and 1, where 0 is the "
+                    "starting state and 1 is when this exact task is completed. If the video shows a different "
+                    "object, an earlier or later subtask, or the same overall task but not this exact subtask, "
+                    "predict 0 progress."
+                )
                 prompt += task_prompt
 
             # Determine which trajectory is A and which is B based on preference label

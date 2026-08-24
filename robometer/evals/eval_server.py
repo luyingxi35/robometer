@@ -541,6 +541,7 @@ def compute_batch_outputs(
     """
     model.eval()
     logger.debug(f"compute_batch_outputs sample_type={sample_type}")
+    torch.cuda.empty_cache()  # free reserved-but-unallocated before forward (co-locate OOM fix per robofape-robometer-server-colocate-oom)
     model_output, _ = forward_model(model, batch_inputs, sample_type=sample_type)
 
     results: Dict[str, Any] = {}
@@ -595,6 +596,7 @@ def compute_batch_outputs(
             }
             # logger.debug(f"success_probs: {success_probs}")
 
+    del model_output; torch.cuda.empty_cache()  # free GPU mem immediately after forward (residue OOM fix)
     return results
 
 
