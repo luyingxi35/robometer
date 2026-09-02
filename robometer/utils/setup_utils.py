@@ -1090,11 +1090,17 @@ def setup_model_and_processor(
                     load_adapters=True,
                     prefer_model_shards=True,
                 )
-                if missing_keys or unexpected_keys:
+                compatibility_unexpected = [k for k in unexpected_keys if not k.startswith("similarity_head.")]
+                if missing_keys or compatibility_unexpected:
                     raise RuntimeError(
                         "Full-model checkpoint does not exactly match the reconstructed RBM: "
-                        f"{len(missing_keys)} missing key(s), {len(unexpected_keys)} unexpected key(s). "
-                        f"Missing sample: {missing_keys[:5]}; unexpected sample: {unexpected_keys[:5]}"
+                        f"{len(missing_keys)} missing key(s), {len(compatibility_unexpected)} unexpected key(s). "
+                        f"Missing sample: {missing_keys[:5]}; unexpected sample: {compatibility_unexpected[:5]}"
+                    )
+                if unexpected_keys:
+                    logger.warning(
+                        "Ignoring compatibility-only unexpected checkpoint keys: "
+                        f"{unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}"
                     )
 
     # elif "rewind_transformer" in cfg.base_model_id or "rewind_scale_transformer" in cfg.base_model_id:
