@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+REPO_ROOT="${REPO_ROOT:-/data/yingxi/RoboFPE}"
+PYTHON_BIN="${PYTHON_BIN:-/data/yingxi/robofac/bin/python}"
+DATA_ROOT="${DATA_ROOT:-/data/yingxi/robometer/failure_detection_5ind_10ood}"
+NUM_SUCCESS_DEMO="${NUM_SUCCESS_DEMO:-100}"
+NUM_FAILURE_DEMO_EACH_TYPE="${NUM_FAILURE_DEMO_EACH_TYPE:-10}"
+LABEL_METHOD="${LABEL_METHOD:-bank}"
+SIMILARITY_MODE="${SIMILARITY_MODE:-norm_stage}"
+SHADER="${SHADER:-default}"
+SIM_BACKEND="${SIM_BACKEND:-auto}"
+RENDER_MODE="${RENDER_MODE:-rgb_array}"
+OBS_MODE="${OBS_MODE:-none}"
+SEED="${SEED:-0}"
+RENDER_DOMAIN_RANDOMIZATION="${RENDER_DOMAIN_RANDOMIZATION:-true}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+FAILED=0
+
+export MS_ASSET_DIR="${MS_ASSET_DIR:-/data/yingxi/robofac}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/etc/vulkan/icd.d/nvidia_icd.json}"
+export __EGL_VENDOR_LIBRARY_FILENAMES="${__EGL_VENDOR_LIBRARY_FILENAMES:-/usr/share/glvnd/egl_vendor.d/10_nvidia.json}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/mani_envs:${REPO_ROOT}/mani_envs/data_collection:${REPO_ROOT}/mani_envs/data_collection/collect:${REPO_ROOT}/mani_envs/data_collection/utils:${PYTHONPATH:-}"
+
+if [[ -n "${TASKS:-}" ]]; then
+  read -r -a TASK_LIST <<< "${TASKS}"
+else
+  TASK_LIST=(
+    PegInsertionVertical-v1
+    PegInsertionSide-v1
+    PlugCharger-v1
+    PushCube-v1
+    StackCube-v1
+  )
+fi
+
+cd "${REPO_ROOT}"
+
+for task in "${TASK_LIST[@]}"; do
+  echo "===== collecting ${task} ====="
+  if ! CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+    TASK_ID="${task}" \
+    NUM_SUCCESS_DEMO="${NUM_SUCCESS_DEMO}" \
+    NUM_FAILURE_DEMO_EACH_TYPE="${NUM_FAILURE_DEMO_EACH_TYPE}" \
+    LABEL_METHOD="${LABEL_METHOD}" \
+    SIMILARITY_MODE="${SIMILARITY_MODE}" \
+    SHADER="${SHADER}" \
+    SIM_BACKEND="${SIM_BACKEND}" \
+    RENDER_MODE="${RENDER_MODE}" \
+    OBS_MODE="${OBS_MODE}" \
+    SEED="${SEED}" \
+    RENDER_DOMAIN_RANDOMIZATION="${RENDER_DOMAIN_RANDOMIZATION}" \
+    WORK_DIR="${DATA_ROOT}" \
+    SUCCESS_DIR="${DATA_ROOT}/raw/${task}/success" \
+    FAILURE_DIR="${DATA_ROOT}/raw/${task}/failure" \
+    PYTHON_BIN="${PYTHON_BIN}" \
+    bash mani_envs/data_collection/auto_collect_label/run_auto_collect_label.sh --skip-query; then
+    echo "Error: pipeline failed for ${task}; continuing." >&2
+    FAILED=1
+    continue
+  fi
+
+  if [[ -d "${DATA_ROOT}/${task}/hf_dataset" ]]; then
+    echo "Completed ${task}"
+  else
+    echo "Error: missing ${DATA_ROOT}/${task}/hf_dataset" >&2
+    FAILED=1
+  fi
+done
+
+exit "${FAILED}"
