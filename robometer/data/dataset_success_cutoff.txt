@@ -1,4 +1,6 @@
 oxe_aloha_mobile,0.95
+gen_progress_success,1.0
+gen_progress_failure,1.0
 oxe_austin_buds_dataset_converted_externally_to_rlds,0.95
 oxe_berkeley_cable_routing,0.95 
 oxe_berkeley_fanuc_manipulation,0.98

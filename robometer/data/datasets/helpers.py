@@ -116,7 +116,9 @@ def compute_success_labels(
         return []
 
     # If trajectory is failure or suboptimal, return all 0s
-    if quality_label is not None and quality_label.lower() in ("failure", "suboptimal", "failed"):
+    if quality_label is not None and quality_label.lower() in (
+        "failure", "failure_labeled", "suboptimal", "suboptimal_labeled", "failed"
+    ):
         return [0.0] * len(target_progress)
 
     # Get the threshold for this data source

@@ -108,6 +108,16 @@ class TestLabeledPrefSampler(unittest.TestCase):
         )
         self.assertEqual(labels, [0.0, 0.0, 0.0])
 
+    def test_failure_labeled_never_has_positive_success_target(self):
+        labels = compute_success_labels(
+            target_progress=[0.0, 0.8, 1.0],
+            data_source="labeled_source",
+            dataset_success_percent={},
+            max_success=1.0,
+            quality_label="failure_labeled",
+        )
+        self.assertEqual(labels, [0.0, 0.0, 0.0])
+
     def test_training_anchor_indices_exclude_failure_labeled(self):
         dataset_rows = [
             {"id": "succ", "task": "peg", "data_source": "labeled_source", "quality_label": "successful_labeled", "is_robot": True},

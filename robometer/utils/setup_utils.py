@@ -516,6 +516,7 @@ def _load_base_model_with_unsloth(
         device_map=None,
         attn_implementation=extra_kwargs["attn_implementation"],
         trust_remote_code=True,
+        local_files_only=os.path.isdir(cfg.base_model_id),
     )
 
     # Apply PEFT if enabled (skip when apply_peft=False, e.g. checkpoint has no adapter files; train.py will add PEFT later)
