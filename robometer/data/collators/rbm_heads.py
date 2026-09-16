@@ -21,6 +21,7 @@ from PIL import Image
 
 MAX_IMAGE_SIDE = 480  # bigger side
 MAX_IMAGE_PIXELS = 1024 * 1024  # safety cap (1.0 MP). raise to 1.5MP if stable
+LABELED_PROGRESS_QUALITY_LABELS = {"successful_labeled", "suboptimal_labeled", "failure_labeled"}
 
 
 def _resize_pil(pil: Image.Image, max_side: int = MAX_IMAGE_SIDE, max_pixels: int = MAX_IMAGE_PIXELS) -> Image.Image:
@@ -83,6 +84,8 @@ def should_compute_progress(
     # If partial_success and not is_preference_only_ds, always compute progress
     # predict partial success for roboreward trajectories not preference only
     elif partial_success is not None and "roboreward" in data_source:
+        return 1.0
+    elif quality_label in LABELED_PROGRESS_QUALITY_LABELS:
         return 1.0
     elif quality_label in ["suboptimal", "failure", "failed"]:
         return 0.0

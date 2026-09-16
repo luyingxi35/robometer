@@ -6,6 +6,7 @@ from robometer.data.datasets.helpers import DataGenStrat, compute_success_labels
 from robometer.data.datasets.rbm_data import RBMDataset
 from robometer.data.samplers.pref import PrefSampler
 from robometer.data.dataset_types import Trajectory
+from robometer.data.collators.rbm_heads import should_compute_progress
 
 
 class FakeHFDataset:
@@ -34,6 +35,27 @@ class CountingFakeHFDataset(FakeHFDataset):
 
 
 class TestLabeledPrefSampler(unittest.TestCase):
+    def test_progress_mask_supports_labeled_targets_and_preserves_legacy_rules(self):
+        for quality_label in ("successful_labeled", "suboptimal_labeled", "failure_labeled"):
+            self.assertEqual(
+                should_compute_progress(quality_label, DataGenStrat.SUBOPTIMAL.value, "labeled_source"),
+                1.0,
+            )
+
+        self.assertEqual(
+            should_compute_progress("successful", DataGenStrat.FORWARD_PROGRESS.value, "source"),
+            1.0,
+        )
+        self.assertEqual(
+            should_compute_progress("unknown", DataGenStrat.REWIND.value, "source"),
+            1.0,
+        )
+        for quality_label in ("failure", "failed", "suboptimal"):
+            self.assertEqual(
+                should_compute_progress(quality_label, DataGenStrat.SUBOPTIMAL.value, "source"),
+                0.0,
+            )
+
     def _make_config(self):
         cfg = DataConfig()
         cfg.labeled_progress_data_sources = ["labeled_source"]

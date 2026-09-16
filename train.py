@@ -255,7 +255,11 @@ def train(cfg: ExperimentConfig):
         **asdict(save_best_cfg),
         base_model=cfg.model.base_model_id,
     )
-    cleanup_callback = CleanupNonSavingIntervalCheckpointsCallback(keep_multiple=100)
+    callbacks = [save_callback]
+    # Dense checkpoint sweeps must retain every 50-step checkpoint. The legacy
+    # cleanup policy is only appropriate for sparse 100-step-or-larger runs.
+    if cfg.training.save_steps >= 100:
+        callbacks.append(CleanupNonSavingIntervalCheckpointsCallback(keep_multiple=100))
 
     trainer = trainer_cls(
         model=peft_rbm_model,
@@ -265,7 +269,7 @@ def train(cfg: ExperimentConfig):
         data_collator=batch_collator,
         config=cfg,
         logger=logger,
-        callbacks=[save_callback, cleanup_callback],
+        callbacks=callbacks,
     )
 
     # Set trainer reference in the callback so it can access trainer methods
