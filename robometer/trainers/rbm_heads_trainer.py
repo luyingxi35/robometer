@@ -683,6 +683,9 @@ class RBMHeadsTrainer(Trainer):
             logger.info(f"Step {self.state.global_step}, Epoch {self.state.epoch:.2f}:")
             logger.info("-" * 50)
             logger.info(f"  train/it_per_sec: {it_per_sec:.4f}")
+            for key in ("train/preference_loss", "train/pref_prog_loss", "train/pref_success_loss"):
+                if key in log_data:
+                    logger.info(f"  {key}: {log_data[key]:.6f}")
             for key in log_global:
                 logger.info(f"  {key}: {log_global[key]}")
 
@@ -2028,7 +2031,12 @@ class RBMHeadsTrainer(Trainer):
         )
         combined_mask_index = combined_mask.bool()
         loss = loss * combined_mask
-        success_loss = loss[combined_mask_index].mean()
+        if combined_mask_index.any():
+            success_loss = loss[combined_mask_index].mean()
+        else:
+            # Keep an autograd connection when a sampled prefix has no
+            # success-supervised frames.
+            success_loss = success_logits.sum() * 0.0
 
         pairwise_loss = torch.tensor(0.0, device=success_logits.device, dtype=success_logits.dtype)
         pairwise_count = torch.tensor(0.0, device=success_logits.device, dtype=torch.float32)

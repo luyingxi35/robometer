@@ -2,6 +2,157 @@
 
 This note documents the training-data collection pipeline used by `robometer` for the 5-task setup driven by `mani_envs/data_collection/auto_collect_label`.
 
+## Natural 5-Task Pilot Training
+
+The finished natural-language 5-task pilot run is stored under:
+
+```text
+/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/
+```
+
+Run status:
+
+- status: completed successfully
+- exit file: `/data/yingxi/robometer/natural_five_task_20260921/logs/train_pilot_v2.exit` (`0`)
+- log: `/data/yingxi/robometer/natural_five_task_20260921/logs/train_pilot_v2.log`
+- trainer state: `/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/trainer_state.json`
+- final step: `500 / 500`
+- runtime: `44460.8298` seconds
+- train loss: `0.14423589715361596`
+- final checkpoint: `/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/checkpoint-500`
+- checkpoints: `checkpoint-50`, `checkpoint-100`, ..., `checkpoint-500`
+
+Key config:
+
+- config: `/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/config.yaml`
+- base model: `/data/yingxi/robometer/Qwen3-VL-4B-Instruct/`
+- trainer: `rbm_heads`
+- train dataset: `local/natural_five_task_train`
+- max steps: `500`
+- save interval: every `50` steps
+- per-device train batch size: `2`
+- gradient accumulation: `4`
+- learning rate: `2e-05`, cosine schedule, warmup ratio `0.1`
+- precision: `bf16`
+- max frames: `8`
+- progress loss: discrete, `10` bins
+- trainable components: language model, progress head, preference head,
+  success head
+- frozen component: vision encoder
+
+Check completion:
+
+```bash
+cat /data/yingxi/robometer/natural_five_task_20260921/logs/train_pilot_v2.exit
+tail -80 /data/yingxi/robometer/natural_five_task_20260921/logs/train_pilot_v2.log
+python3 - <<'PY'
+import json
+p = "/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/trainer_state.json"
+with open(p) as f:
+    state = json.load(f)
+print(state["global_step"], state["max_steps"])
+print(state["log_history"][-1])
+PY
+```
+
+## Natural 5-Task Checkpoint Eval
+
+Use `evals/eval_natural_five_task.py` for the natural-language 5-task pilot
+checkpoints. It reports three metric families in one run:
+
+- `progress`: per-frame MAE and Spearman over the sampled frames.
+- `failure_detection`: progress-head based failure classification metrics.
+  The default fixed-threshold rule is
+  `failure if final_pred_progress < 0.5`; `success_prob` / success head is not
+  used for the reported failure detection metrics.
+- `filtering`: top-k successful-trajectory rate for `pearson`, `final`,
+  `delta`, `slope`, and `late_mean_delta` scores.
+
+Run from the robometer repo:
+
+```bash
+cd /data/yingxi/RoboFPE/robometer
+export CUDA_VISIBLE_DEVICES=0
+```
+
+Smoke test, using the small smoke checkpoint and smoke dataset:
+
+```bash
+.venv/bin/python evals/eval_natural_five_task.py smoke --force
+```
+
+Single formal checkpoint:
+
+```bash
+.venv/bin/python evals/eval_natural_five_task.py single \
+  --checkpoint /data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/checkpoint-500
+```
+
+Full formal sweep over all `checkpoint-*` directories, sequentially:
+
+```bash
+.venv/bin/python evals/eval_natural_five_task.py sweep
+```
+
+Background formal sweep:
+
+```bash
+nohup env CUDA_VISIBLE_DEVICES=0 .venv/bin/python evals/eval_natural_five_task.py sweep \
+  > /data/yingxi/robometer/natural_five_task_20260921/logs/eval_sweep.log 2>&1 &
+```
+
+Default formal inputs:
+
+- dataset: `/data/yingxi/robometer/natural_five_task_20260921/processed/local_natural_five_task_test/processed_dataset`
+- manifest: `/data/yingxi/robometer/natural_five_task_20260921/local_hf/natural_five_task_test/selection_manifest.json`
+- checkpoints: `/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/checkpoint-*`
+- output: `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep`
+
+Outputs:
+
+- `run_config.json`: dataset, manifest hash, checkpoint list, thresholds, and code commit.
+- `step_000XXX_metrics.json`: metrics for one checkpoint.
+- `step_000XXX_records.json`: per-trajectory predictions used to compute metrics.
+- `metrics.json`: concatenated metrics for all evaluated checkpoints.
+- `sweep_summary.json`: compact per-checkpoint summary.
+- `per_task_step500_summary.csv`: final-checkpoint per-task metrics.
+- `plots/*.png` and `plots/*.jpg`: image exports for reports.
+- `plots/progress_success_failure_average_task_macro.csv`: progress split
+  curves for success, failure, and average.
+- `plots/per_task_dashboards/`: one PNG/JPG dashboard per task, plus
+  `per_task_dashboard_timeseries.csv`.
+
+Generated plots:
+
+![Progress metrics vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/progress_metrics_vs_step.png)
+
+![Progress success metrics vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/progress_success_metrics_vs_step.png)
+
+![Progress failure metrics vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/progress_failure_metrics_vs_step.png)
+
+![Progress average metrics vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/progress_average_metrics_vs_step.png)
+
+![Failure detection metrics vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/failure_metrics_vs_step.png)
+
+![Filtering best rate vs checkpoint step](/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/filtering_best_rate_vs_step.png)
+
+Per-task dashboards:
+
+- `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/per_task_dashboards/PickCube-ball_dashboard.png`
+- `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/per_task_dashboards/PlugCharger-v1_dashboard.png`
+- `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/per_task_dashboards/PullCube-block_dashboard.png`
+- `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/per_task_dashboards/PushCube-v1_dashboard.png`
+- `/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/plots/per_task_dashboards/StackCube-v1_dashboard.png`
+
+The previous success-head failure-detection metrics are preserved under:
+
+```text
+/data/yingxi/robometer/natural_five_task_20260921/eval_sweep/success_prob_failure_detection_backup/
+```
+
+Existing step metrics are skipped by default so interrupted sweeps can resume.
+Pass `--force` to recompute.
+
 ## Tasks
 
 The 5 tasks currently used by this collection flow are:

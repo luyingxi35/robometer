@@ -1297,6 +1297,7 @@ def create_training_arguments(cfg: TrainingConfig, output_dir: str, is_eval: boo
         "logging_steps": cfg.logging_steps,
         "save_steps": cfg.save_steps,
         "save_total_limit": cfg.save_total_limit,
+        "save_only_model": cfg.save_only_model,
         "bf16": cfg.bf16,
         "fp16": cfg.fp16,
         "remove_unused_columns": cfg.remove_unused_columns,

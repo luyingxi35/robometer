@@ -1,0 +1,18 @@
+dataset_roots:
+  - "/data/yingxi/robometer/natural_five_task_20260921/local_hf/natural_five_task_train"
+  - "/data/yingxi/robometer/natural_five_task_20260921/local_hf/natural_five_task_test"
+dataset_names:
+  - "local/natural_five_task_train"
+  - "local/natural_five_task_test"
+max_frames_for_preprocessing: 32
+video_frame_sampling: "uniform"
+num_proc: 1
+num_threads: 8
+force_reprocess: true
+cache_dir: "/data/yingxi/robometer/natural_five_task_20260921/processed"
+require_partial_success: true
+require_target_progress: true
+require_lang_vector: true
+compute_lang_vector_if_missing: false
+precompute_embeddings: false
+sentence_model: "sentence-transformers/all-MiniLM-L12-v2"

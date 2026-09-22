@@ -291,6 +291,71 @@ class RBMModel:
 
         return results
 
+    def compute_batched_progress_and_success(
+        self, samples: List[ProgressSample]
+    ) -> tuple[List[List[float]], List[List[float]]]:
+        """Compute progress and success-head probabilities in one forward pass."""
+        if not samples:
+            return [], []
+
+        batch_inputs = self.batch_collator(samples)
+        progress_inputs = batch_inputs["progress_inputs"]
+        progress_inputs = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in progress_inputs.items()
+        }
+
+        with torch.inference_mode():
+            model_output, _ = forward_model(self.model, progress_inputs, sample_type="progress")
+
+        progress_logits = model_output.progress_logits
+        if isinstance(progress_logits, dict):
+            progress_tensor = progress_logits.get("A")
+        else:
+            progress_tensor = progress_logits
+        if progress_tensor is None:
+            raise ValueError("No progress logits returned from model")
+
+        success_logits = getattr(model_output, "success_logits", None)
+        if isinstance(success_logits, dict):
+            success_tensor = success_logits.get("A")
+        else:
+            success_tensor = success_logits
+        if success_tensor is None:
+            raise ValueError("No success logits returned from model")
+
+        success_probs = torch.sigmoid(success_tensor)
+        batch_size = progress_tensor.shape[0]
+        progress_results = []
+        success_results = []
+
+        for i in range(batch_size):
+            if progress_tensor.ndim == 2:
+                progress_values = progress_tensor[i].cpu().tolist()
+            elif progress_tensor.ndim == 3:
+                progress_values = convert_bins_to_continuous(progress_tensor[i]).cpu().tolist()
+            else:
+                raise ValueError(f"Unexpected progress_tensor shape: {progress_tensor.shape}")
+            if isinstance(progress_values, float):
+                progress_values = [progress_values]
+
+            if success_probs.ndim == 1:
+                success_values = [float(success_probs[i].item())]
+            elif success_probs.ndim == 2:
+                success_values = success_probs[i].cpu().tolist()
+            elif success_probs.ndim == 3 and success_probs.shape[-1] == 1:
+                success_values = success_probs[i, :, 0].cpu().tolist()
+            else:
+                raise ValueError(f"Unexpected success_tensor shape: {success_tensor.shape}")
+            if isinstance(success_values, float):
+                success_values = [success_values]
+            if len(success_values) == 1 and len(progress_values) > 1:
+                success_values = success_values * len(progress_values)
+
+            progress_results.append([float(x) for x in progress_values])
+            success_results.append([float(x) for x in success_values])
+
+        return progress_results, success_results
+
     def compute_batched_preference(self, samples: List[PreferenceSample]) -> List[Dict[str, Any]]:
         """Compute preference predictions for a batch of trajectory pairs.
 
