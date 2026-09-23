@@ -153,6 +153,57 @@ The previous success-head failure-detection metrics are preserved under:
 Existing step metrics are skipped by default so interrupted sweeps can resume.
 Pass `--force` to recompute.
 
+## StackCube Failure Comparison: checkpoint-400 vs basefixed
+
+The StackCube failure test set can be evaluated against both the trained
+`checkpoint-400` and the pre-training `robometer-4b_basefixed` checkpoint:
+
+```bash
+cd /data/yingxi/RoboFPE/robometer
+export CUDA_VISIBLE_DEVICES=0
+
+# Smoke test: two StackCube failure trajectories
+.venv/bin/python evals/eval_stackcube_failure_compare.py \
+  --limit 2 \
+  --output-dir /data/yingxi/robometer/natural_five_task_20260921/eval_stackcube_failure_smoke
+
+# Formal test: all 50 StackCube failure trajectories
+.venv/bin/python evals/eval_stackcube_failure_compare.py \
+  --output-dir /data/yingxi/robometer/natural_five_task_20260921/eval_stackcube_failure_ckpt400_vs_basefixed
+```
+
+The script evaluates:
+
+- trained model:
+  `/data/yingxi/robometer/natural_five_task_20260921/training/natural_five_task_fsdp_pilot/checkpoint-400`
+- base model:
+  `/data/yingxi/robometer/robometer-4b_basefixed`
+- dataset:
+  `/data/yingxi/robometer/natural_five_task_20260921/local_hf/natural_five_task_test`
+
+Outputs are written under `per_trajectory/<trajectory-id>/`:
+
+- `render_camera_frames/`: all 32 preprocessed label/render-camera frames.
+- `dashboard.png` and `dashboard.jpg`: downsampled render-camera frames above
+  the label, checkpoint-400, and basefixed progress curves.
+- `records.json`: raw predictions, labels, frame indices, and image paths.
+- `metrics.json`: mean per-trajectory MAE and Spearman for both models.
+- `summary.csv`: one metric row per trajectory.
+
+Frame alignment is explicit. Each source failure trajectory has 300 progress
+labels and 301 render-camera frames. The first video frame is the reset frame,
+so preprocessing uses:
+
+```text
+progress_indices = floor(i * 300 / 32)
+render_indices = progress_indices + video_frame_offset
+```
+
+The full 32 aligned points are saved as images. Model inference uses the same
+8-frame subsampling as the five-task eval; the dashboard uses those same eight
+render-camera timesteps on its x-axis, so every image column is aligned with
+the corresponding curve point.
+
 ## Tasks
 
 The 5 tasks currently used by this collection flow are:
