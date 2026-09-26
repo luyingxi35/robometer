@@ -214,6 +214,12 @@ class DataConfig:
     # [different_task, forward_progress, reverse_progress, rewind]
     progress_strategy_ratio: List[float] = field(default_factory=lambda: [1, 1, 1, 1])
     labeled_progress_data_sources: List[str] = field(default_factory=lambda: ["gen_progress_success", "gen_progress_failure"])
+    labeled_progress_rejected_ratio: float = field(
+        default=0.5,
+        metadata={
+            "help": "Probability of using a rejected failure_labeled trajectory for progress supervision in labeled preference pairs."
+        },
+    )
     labeled_quality_order: Dict[str, int] = field(
         default_factory=lambda: {
             "successful_labeled": 2,

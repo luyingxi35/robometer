@@ -682,6 +682,12 @@ class RBMBatchCollator(BaseCollator):
         batch_inputs["chosen_data_gen_strategy"] = [DataGenStrat.FORWARD_PROGRESS.value] * len(preference_samples)
         batch_inputs["rejected_data_gen_strategy"] = [sample.data_gen_strategy for sample in preference_samples]
         batch_inputs["chosen_quality_label"] = [sample.chosen_trajectory.quality_label for sample in preference_samples]
+        batch_inputs["rejected_quality_label"] = [
+            sample.rejected_trajectory.quality_label for sample in preference_samples
+        ]
+        batch_inputs["rejected_data_source"] = [
+            sample.rejected_trajectory.data_source for sample in preference_samples
+        ]
 
         target_progress_chosen = [sample.chosen_trajectory.target_progress for sample in preference_samples]
         target_progress_rejected = [sample.rejected_trajectory.target_progress for sample in preference_samples]

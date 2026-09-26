@@ -2678,21 +2678,73 @@ class RBMHeadsTrainer(Trainer):
         # =========================================================================================
         target_progress_A = inputs["target_progress_A"]
         target_progress_A_mask = inputs["target_progress_A_mask"].unsqueeze(-1)
+        target_progress_B = inputs.get("target_progress_B")
+        target_progress_B_mask = inputs.get("target_progress_B_mask")
         data_gen_strat = inputs["trajectory_A_data_gen_strategy"]
         logger.debug(f"DATA GEN STRAT FOR TRAJ A: {data_gen_strat}")
         logger.debug(f"DATA SOURCE FOR TRAJ A: {inputs['trajectory_A_data_source']}")
         # logger.warning(f"PREFERENCE LABELS: {inputs['preference_labels']}")
 
         if self.config.model.train_progress_head and self.config.training.predict_pref_progress:
+            # Keep the historical A-side loss for all samples except preference pairs whose
+            # rejected trajectory is explicitly failure_labeled. For those pairs, randomly
+            # supervise the chosen or rejected trajectory, mapped to its actual A/B position.
+            progress_mask_A = target_progress_A_mask
+            progress_loss_B = None
+            progress_metrics_B = None
+            rejected_supervision_count = 0
+            if (
+                target_progress_B is not None
+                and target_progress_B_mask is not None
+                and "rejected_quality_label" in inputs
+            ):
+                labeled_sources = set(getattr(self.config.data, "labeled_progress_data_sources", []) or [])
+                rejected_quality = inputs["rejected_quality_label"]
+                rejected_sources = inputs.get("rejected_data_source", [None] * len(rejected_quality))
+                eligible = torch.tensor(
+                    [
+                        quality == "failure_labeled" and source in labeled_sources
+                        for quality, source in zip(rejected_quality, rejected_sources)
+                    ],
+                    dtype=torch.bool,
+                    device=target_progress_A.device,
+                )
+                rejected_ratio = float(getattr(self.config.data, "labeled_progress_rejected_ratio", 0.5))
+                if not 0.0 <= rejected_ratio <= 1.0:
+                    raise ValueError("data.labeled_progress_rejected_ratio must be between 0 and 1")
+                use_rejected = eligible & (torch.rand(eligible.shape, device=target_progress_A.device) < rejected_ratio)
+                rejected_supervision_count = int(use_rejected.sum().item())
+
+                # preference_labels==1 means chosen is A; otherwise chosen is B.
+                chosen_is_A = preference_labels.bool()
+                selected_A = (~eligible) | (eligible & (use_rejected != chosen_is_A))
+                selected_B = eligible & ~selected_A
+                progress_mask_A = target_progress_A_mask * selected_A.unsqueeze(-1).float()
+                progress_mask_B = target_progress_B_mask.unsqueeze(-1) * selected_B.unsqueeze(-1).float()
+            else:
+                progress_mask_B = None
+
             progress_pred_A = progress_logits["A"]
             predict_last_frame_mask_A = inputs["predict_last_frame_mask_A"]
             progress_loss_A, spearman_corr_A, progress_metrics_A = self._compute_progress_loss_helper(
                 progress_pred_A,
                 target_progress_A,
-                target_progress_A_mask,
+                progress_mask_A,
                 predict_last_frame_mask=predict_last_frame_mask_A,
             )
-            final_loss += progress_loss_A
+            progress_loss_total = progress_loss_A
+
+            if progress_mask_B is not None and progress_mask_B.sum() > 0:
+                progress_pred_B = progress_logits["B"]
+                progress_loss_B, spearman_corr_B, progress_metrics_B = self._compute_progress_loss_helper(
+                    progress_pred_B,
+                    target_progress_B,
+                    progress_mask_B,
+                    predict_last_frame_mask=inputs["predict_last_frame_mask_B"],
+                )
+                progress_loss_total = progress_loss_total + progress_loss_B
+
+            final_loss += progress_loss_total
 
         if self.config.model.train_success_head:
             success_logits = model_outputs.success_logits
@@ -2725,8 +2777,9 @@ class RBMHeadsTrainer(Trainer):
 
             if self.config.model.train_progress_head and self.config.training.predict_pref_progress:
                 outputs_dict.update({
-                    f"{prefix}/pref_prog_loss": progress_loss_A.item(),
+                    f"{prefix}/pref_prog_loss": progress_loss_total.item(),
                     f"{prefix}/pref_prog_spearman_corr": spearman_corr_A.item(),
+                    f"{prefix}/pref_prog_rejected_supervision_count": rejected_supervision_count,
                 })
 
                 # Add progress accuracy for discrete mode
@@ -2734,10 +2787,10 @@ class RBMHeadsTrainer(Trainer):
                     # Expand mask to match masked_progress_accuracy shape [batch_size, seq_len]
                     masked_progress_accuracy = progress_metrics_A["masked_progress_accuracy"]
                     batch_size, seq_len = masked_progress_accuracy.shape
-                    if target_progress_A_mask.shape[1] != seq_len:
-                        mask_expanded = target_progress_A_mask.expand(batch_size, seq_len)
+                    if progress_mask_A.shape[1] != seq_len:
+                        mask_expanded = progress_mask_A.expand(batch_size, seq_len)
                     else:
-                        mask_expanded = target_progress_A_mask
+                        mask_expanded = progress_mask_A
                     progress_accuracy_A = masked_progress_accuracy.sum() / (mask_expanded.sum() + 1e-8)
                     outputs_dict[f"{prefix}/pref_prog_accuracy"] = progress_accuracy_A.item()
 
@@ -2752,7 +2805,7 @@ class RBMHeadsTrainer(Trainer):
                     inputs["trajectory_A_data_gen_strategy"],
                     inputs["trajectory_A_data_source"],
                     stratified_progress_metrics,
-                    target_progress_A_mask,
+                    progress_mask_A,
                 )
 
             if self.config.model.train_success_head:

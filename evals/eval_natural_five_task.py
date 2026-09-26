@@ -25,7 +25,10 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 TASK_RE = re.compile(r"^(?P<task>.+?)_(?:test|success|failure|suboptimal)_")
 QUALITY_LABELS = ("successful_labeled", "failure_labeled")
-SCORE_METHODS = ("pearson", "final", "delta", "slope", "late_mean_delta")
+# Filtering uses a single progress-only composite score. Components are
+# normalized per task over the candidate trajectories before equal weighting.
+SCORE_METHODS = ("pearson_delta_final_minmax",)
+FILTER_SCORE_WEIGHTS = {"pearson": 1.0, "delta": 1.0, "final": 1.0}
 ROOT = Path("/data/yingxi/robometer/natural_five_task_20260921")
 FORMAL_DATASET = ROOT / "processed/local_natural_five_task_test/processed_dataset"
 FORMAL_MANIFEST = ROOT / "local_hf/natural_five_task_test/selection_manifest.json"
@@ -213,11 +216,28 @@ def auc_pr(labels: List[int], scores: List[float]) -> Optional[float]:
     return area
 
 
-def failure_metrics(records: List[Dict[str, Any]], threshold: float) -> Dict[str, Any]:
+def pearson_failure_stats(progress: Iterable[float], window: int, threshold: float) -> Tuple[bool, Optional[float]]:
+    values = np.asarray(list(progress), dtype=float)
+    if len(values) < window:
+        return False, None
+    x = np.arange(window, dtype=float)
+    correlations = []
+    for start in range(len(values) - window + 1):
+        y = values[start : start + window]
+        corr = 0.0 if float(np.std(y)) < 1e-8 else float(np.corrcoef(x, y)[0, 1])
+        if np.isfinite(corr):
+            correlations.append(corr)
+    if not correlations:
+        return False, None
+    minimum = min(correlations)
+    return minimum <= threshold, minimum
+
+
+def failure_metrics(records: List[Dict[str, Any]], pearson_window: int, pearson_threshold: float) -> Dict[str, Any]:
     labels = [1 if r["quality_label"] == "failure_labeled" else 0 for r in records]
-    final_progress = [float(r["pred_progress"][-1]) for r in records]
-    scores = [1.0 - value for value in final_progress]
-    preds = [1 if value < threshold else 0 for value in final_progress]
+    stats = [pearson_failure_stats(r["pred_progress"], pearson_window, pearson_threshold) for r in records]
+    scores = [float(-s[1]) if s[1] is not None else 0.0 for s in stats]
+    preds = [1 if s[0] else 0 for s in stats]
     tp = sum(1 for y, p in zip(labels, preds) if y == 1 and p == 1)
     tn = sum(1 for y, p in zip(labels, preds) if y == 0 and p == 0)
     fp = sum(1 for y, p in zip(labels, preds) if y == 0 and p == 1)
@@ -231,8 +251,8 @@ def failure_metrics(records: List[Dict[str, Any]], threshold: float) -> Dict[str
     denom = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
     return {
         "n": len(records),
-        "score_source": "final_pred_progress",
-        "threshold_rule": "failure if final_pred_progress < success_threshold",
+        "score_source": "minimum_sliding_window_progress_pearson",
+        "threshold_rule": f"failure if any {pearson_window}-frame progress Pearson <= {pearson_threshold}",
         "accuracy": (tp + tn) / len(records) if records else 0.0,
         "macro_f1": macro_f1,
         "balanced_accuracy": (rec + spec) / 2,
@@ -269,7 +289,36 @@ def score_record(record: Dict[str, Any], method: str) -> float:
     raise ValueError(method)
 
 
-def build_metrics(records: List[Dict[str, Any]], step: int, model_path: str, top_k: int, threshold: float) -> List[Dict[str, Any]]:
+def filtering_component_scores(records: List[Dict[str, Any]]) -> np.ndarray:
+    """Return per-task min-max normalized [Pearson, delta, final] scores."""
+    components = []
+    for record in records:
+        pred = np.asarray(record["pred_progress"], dtype=float)
+        target = np.asarray(record["target_progress"], dtype=float)
+        pearson = safe_corr(pred, target)
+        components.append([
+            -1.0 if pearson is None else float(pearson),
+            float(pred[-1] - pred[0]),
+            float(pred[-1]),
+        ])
+    values = np.asarray(components, dtype=float)
+    if not len(values):
+        return values
+    low = values.min(axis=0)
+    high = values.max(axis=0)
+    span = high - low
+    return np.divide(values - low, span, out=np.zeros_like(values), where=span > 1e-12)
+
+
+def filtering_composite_scores(records: List[Dict[str, Any]]) -> np.ndarray:
+    normalized = filtering_component_scores(records)
+    if not len(normalized):
+        return np.asarray([], dtype=float)
+    weights = np.asarray([FILTER_SCORE_WEIGHTS[name] for name in ("pearson", "delta", "final")], dtype=float)
+    return normalized @ weights
+
+
+def build_metrics(records: List[Dict[str, Any]], step: int, model_path: str, top_k: int, pearson_window: int, pearson_threshold: float) -> List[Dict[str, Any]]:
     metrics: List[Dict[str, Any]] = []
     tasks = sorted({r["scope"] for r in records})
 
@@ -329,7 +378,7 @@ def build_metrics(records: List[Dict[str, Any]], step: int, model_path: str, top
     fail_rows = []
     for task in tasks:
         subset = [r for r in records if r["scope"] == task]
-        row = with_common({"family": "failure_detection", "scope": task, **failure_metrics(subset, threshold)})
+        row = with_common({"family": "failure_detection", "scope": task, **failure_metrics(subset, pearson_window, pearson_threshold)})
         fail_rows.append(row)
         metrics.append(row)
     if fail_rows:
@@ -346,36 +395,45 @@ def build_metrics(records: List[Dict[str, Any]], step: int, model_path: str, top
             "fp": int(sum(r["fp"] for r in fail_rows)),
             "fn": int(sum(r["fn"] for r in fail_rows)),
         }))
-    metrics.append(with_common({"family": "failure_detection", "scope": "sample_micro", **failure_metrics(records, threshold)}))
+    metrics.append(with_common({"family": "failure_detection", "scope": "sample_micro", **failure_metrics(records, pearson_window, pearson_threshold)}))
 
     filtering_rows = []
     for task in tasks:
         subset = [r for r in records if r["scope"] == task]
         k = min(top_k, len(subset))
-        for method in SCORE_METHODS:
-            ranked = sorted(subset, key=lambda r: score_record(r, method), reverse=True)
-            chosen = ranked[:k]
-            best = sum(1 for r in chosen if r["quality_label"] == "successful_labeled")
-            row = with_common({
-                "family": "filtering",
-                "scope": task,
-                "score_method": method,
-                "candidate_count": len(subset),
-                "top_k": k,
-                "best_count": best,
-                "best_rate": best / k if k else 0.0,
-                "success_total": sum(1 for r in subset if r["quality_label"] == "successful_labeled"),
-            })
-            filtering_rows.append(row)
-            metrics.append(row)
+        composite = filtering_composite_scores(subset)
+        ranked = [subset[i] for i in np.argsort(-composite, kind="stable")[:k]]
+        best = sum(1 for r in ranked if r["quality_label"] == "successful_labeled")
+        row = with_common({
+            "family": "filtering",
+            "scope": task,
+            "score_method": SCORE_METHODS[0],
+            "score_components": ["pearson", "delta", "final"],
+            "normalization": "per_task_minmax",
+            "score_weights": FILTER_SCORE_WEIGHTS,
+            "candidate_count": len(subset),
+            "top_k": k,
+            "correct_count": best,
+            "correctness": best / k if k else 0.0,
+            "best_count": best,
+            "best_rate": best / k if k else 0.0,
+            "success_total": sum(1 for r in subset if r["quality_label"] == "successful_labeled"),
+        })
+        filtering_rows.append(row)
+        metrics.append(row)
     for method in SCORE_METHODS:
         rows = [r for r in filtering_rows if r["score_method"] == method]
         metrics.append(with_common({
             "family": "filtering",
             "scope": "task_macro",
             "score_method": method,
+            "score_components": ["pearson", "delta", "final"],
+            "normalization": "per_task_minmax",
+            "score_weights": FILTER_SCORE_WEIGHTS,
             "candidate_count": int(sum(r["candidate_count"] for r in rows)),
             "top_k": int(sum(r["top_k"] for r in rows)),
+            "correct_count": int(sum(r["correct_count"] for r in rows)),
+            "correctness": float(np.mean([r["correctness"] for r in rows])) if rows else 0.0,
             "best_count": int(sum(r["best_count"] for r in rows)),
             "best_rate": float(np.mean([r["best_rate"] for r in rows])) if rows else 0.0,
             "success_total": int(sum(r["success_total"] for r in rows)),
@@ -432,7 +490,7 @@ def run_checkpoint(args: argparse.Namespace, checkpoint: Path, rows: List[Dict[s
             "success_prob": float(success[min(len(success), n) - 1]) if success and n else 0.0,
         })
 
-    metrics = build_metrics(records, step, str(checkpoint), args.top_k, args.success_threshold)
+    metrics = build_metrics(records, step, str(checkpoint), args.top_k, args.pearson_window, args.pearson_threshold)
     atomic_json(step_metrics, metrics)
     atomic_json(args.output_dir / f"step_{step:06d}_records.json", records)
     return metrics
@@ -447,7 +505,12 @@ def write_run_config(args: argparse.Namespace, checkpoints: List[Path]) -> None:
         "selection_manifest_sha256": sha256_file(args.selection_manifest),
         "per_class": args.per_class,
         "top_k": args.top_k,
-        "success_threshold": args.success_threshold,
+        "filtering_score_method": SCORE_METHODS[0],
+        "filtering_score_components": ["pearson", "delta", "final"],
+        "filtering_normalization": "per_task_minmax",
+        "filtering_score_weights": FILTER_SCORE_WEIGHTS,
+        "pearson_window": args.pearson_window,
+        "pearson_threshold": args.pearson_threshold,
         "batch_size": args.batch_size,
         "max_frames": args.max_frames,
         "checkpoints": [{"step": step_from_checkpoint(p), "path": p} for p in checkpoints],
@@ -463,8 +526,9 @@ def parse_args() -> argparse.Namespace:
         sp.add_argument("--selection-manifest", type=Path, default=FORMAL_MANIFEST)
         sp.add_argument("--output-dir", type=Path, default=ROOT / "eval_sweep")
         sp.add_argument("--per-class", type=int, default=50)
-        sp.add_argument("--top-k", type=int, default=30)
-        sp.add_argument("--success-threshold", type=float, default=0.5)
+        sp.add_argument("--top-k", type=int, default=50)
+        sp.add_argument("--pearson-window", type=int, default=5)
+        sp.add_argument("--pearson-threshold", type=float, default=-0.5)
         sp.add_argument("--batch-size", type=int, default=16)
         sp.add_argument("--max-frames", type=int, default=8)
         sp.add_argument("--force", action="store_true")
