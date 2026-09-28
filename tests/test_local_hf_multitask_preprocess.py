@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from robometer.data.scripts.preprocess_local_hf_datasets import LocalHFDatasetPreprocessor
@@ -35,6 +37,19 @@ class TestLocalHFMultitaskPreprocess(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "video/progress length mismatch"):
             preprocessor._sample_aligned_video_progress_indices(22, 20)
+
+    def test_relative_video_path_is_resolved_from_dataset_root(self):
+        preprocessor = self._make_preprocessor()
+        with TemporaryDirectory() as directory:
+            dataset_root = Path(directory) / "hf_dataset"
+            video = Path(directory) / "media" / "sample.mp4"
+            dataset_root.mkdir()
+            video.parent.mkdir()
+            video.touch()
+
+            resolved = preprocessor._resolve_video_path("../media/sample.mp4", str(dataset_root))
+
+            self.assertEqual(Path(resolved), video)
 
 
 if __name__ == "__main__":

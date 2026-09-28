@@ -683,7 +683,12 @@ class RBMHeadsTrainer(Trainer):
             logger.info(f"Step {self.state.global_step}, Epoch {self.state.epoch:.2f}:")
             logger.info("-" * 50)
             logger.info(f"  train/it_per_sec: {it_per_sec:.4f}")
-            for key in ("train/preference_loss", "train/pref_prog_loss", "train/pref_success_loss"):
+            for key in (
+                "train/preference_loss",
+                "train/pref_prog_loss",
+                "train/pref_prog_rejected_supervision_count",
+                "train/pref_success_loss",
+            ):
                 if key in log_data:
                     logger.info(f"  {key}: {log_data[key]:.6f}")
             for key in log_global:

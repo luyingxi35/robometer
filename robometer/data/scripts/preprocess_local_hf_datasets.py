@@ -24,6 +24,7 @@ if os.environ.get("ROBOMETER_PREPROCESS_ALLOW_CUDA", "0") != "1":
 import decord  # type: ignore
 import numpy as np
 import torch
+from PIL import Image
 from datasets import Dataset, Sequence, Value, load_from_disk
 from pyrallis import wrap
 from sentence_transformers import SentenceTransformer
@@ -283,6 +284,10 @@ class LocalHFDatasetPreprocessor:
 
     def _resolve_video_path(self, video_path: str, dataset_root: str) -> str:
         """Resolve stale absolute paths in stored rows to the current dataset root layout."""
+        if not os.path.isabs(video_path):
+            candidate = os.path.normpath(os.path.join(dataset_root, video_path))
+            if os.path.exists(candidate):
+                return candidate
         if os.path.exists(video_path):
             return video_path
 
@@ -325,21 +330,25 @@ class LocalHFDatasetPreprocessor:
         def process_one(i: int):
             ex: dict[str, Any] = dataset[i]
             ex_id = ex.get("id", f"row_{i}")
+            if ex.get("frames_videos"):
+                raise ValueError(f"multi-camera frames_videos is not supported for id={ex_id}")
             video_path = ex.get("frames_video")
             if not isinstance(video_path, str) or not video_path:
                 raise ValueError(f"frames_video missing/invalid for id={ex_id}")
             video_path = self._resolve_video_path(video_path, dataset_root)
-
-            vr = decord.VideoReader(video_path, num_threads=1)
-            total_frames = len(vr)
+            reader = decord.VideoReader(video_path, num_threads=1)
+            total_frames = len(reader)
             raw_progress = ex.get("target_progress")
             if not isinstance(raw_progress, (list, tuple)):
                 raise ValueError(f"target_progress must be a sequence for id={ex_id}")
             video_indices, progress_indices, video_frame_offset = self._sample_aligned_video_progress_indices(
                 total_frames, len(raw_progress)
             )
-            frames_array = vr.get_batch(video_indices).asnumpy()
-            del vr
+            sampled_frames = reader.get_batch(video_indices).asnumpy()
+            frames_array = np.stack(
+                [np.asarray(Image.fromarray(frame).resize((224, 224))) for frame in sampled_frames]
+            )
+            del reader
 
             sampled_progress = self._validate_and_get_progress(ex, progress_indices)
             if len(sampled_progress) != int(frames_array.shape[0]):
@@ -381,7 +390,7 @@ class LocalHFDatasetPreprocessor:
                 "data_source": str(ex.get("data_source", "unknown")),
                 "quality_label": str(ex.get("quality_label", "successful")),
                 "is_robot": bool(ex.get("is_robot", True)),
-                "frames": frames_path,
+                "frames": os.path.relpath(frames_path, self.config.cache_dir),
                 "frames_shape": tuple(frames_array.shape),
                 "num_frames": int(frames_array.shape[0]),
                 "frames_processed": True,
@@ -389,7 +398,8 @@ class LocalHFDatasetPreprocessor:
                 "partial_success": partial_success,
                 "lang_vector": lang_vector,
                 "metadata": {
-                    "video_path": video_path,
+                    "video_path": ex.get("frames_video"),
+                    "camera": "render_camera",
                     "video_frame_offset": video_frame_offset,
                 },
             }
